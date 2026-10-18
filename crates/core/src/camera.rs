@@ -4,7 +4,7 @@
 //! space (Y down, depth in `[0, 1]`) with reverse-Z and an infinite far plane,
 //! which gives near-uniform depth precision for huge scenes.
 
-use glam::{Mat4, Vec3, Vec4};
+use glam::{Mat4, Vec2, Vec3, Vec4};
 
 use crate::bounds::Aabb;
 
@@ -105,6 +105,41 @@ impl OrbitCamera {
         self.near = radius * 1e-3;
     }
 
+    /// Scales the camera about `point` by `factor` (< 1 moves closer): the
+    /// view direction is kept and `point` stays at the same place on screen.
+    pub fn zoom_about(&mut self, point: Vec3, factor: f32) {
+        let factor = factor.max(MIN_DISTANCE / self.distance);
+        self.target = point + (self.target - point) * factor;
+        self.distance *= factor;
+        self.near = self.near.min(self.distance * 0.1);
+    }
+
+    /// Moves the orbit pivot along the view axis to the depth of `point`,
+    /// without changing the view. Orbiting, panning and zooming then behave
+    /// relative to that depth, which keeps navigation usable close to the
+    /// surface. Points behind the camera are ignored.
+    pub fn set_pivot_depth(&mut self, point: Vec3) {
+        let eye = self.eye();
+        let depth = (point - eye).dot(-self.back());
+        if depth > MIN_DISTANCE {
+            self.target = eye - self.back() * depth;
+            self.distance = depth;
+            self.near = self.near.min(depth * 0.1);
+        }
+    }
+
+    /// World-space ray through a point of the viewport, given in normalized
+    /// device coordinates (`[-1, 1]`, Y down). Returns the origin (the eye)
+    /// and a unit direction.
+    pub fn ray(&self, ndc: Vec2, aspect: f32) -> (Vec3, Vec3) {
+        let back = self.back();
+        let right = Vec3::Y.cross(back).normalize();
+        let up = back.cross(right);
+        let half_height = (self.fov_y * 0.5).tan();
+        let dir = -back + right * (ndc.x * half_height * aspect) - up * (ndc.y * half_height);
+        (self.eye(), dir.normalize())
+    }
+
     /// Size in world units of one pixel at the target depth.
     pub fn world_per_pixel(&self, viewport_height: f32) -> f32 {
         2.0 * self.distance * (self.fov_y * 0.5).tan() / viewport_height.max(1.0)
@@ -194,6 +229,69 @@ mod tests {
         let moved_px = (after - before).truncate() * height / 2.0;
         assert!((moved_px.x - 40.0).abs() < 1e-2, "{moved_px}");
         assert!((moved_px.y + 25.0).abs() < 1e-2, "{moved_px}");
+    }
+
+    #[test]
+    fn ray_passes_through_the_pixel() {
+        let cam = OrbitCamera {
+            yaw: 2.0,
+            pitch: -0.3,
+            target: Vec3::new(1.0, 0.0, -2.0),
+            ..Default::default()
+        };
+        let aspect = 1.6;
+        let vp = cam.view_projection(aspect);
+        let (origin, dir) = cam.ray(Vec2::ZERO, aspect);
+        assert!((origin + dir * cam.distance).distance(cam.target) < 1e-4);
+        for ndc in [Vec2::new(0.5, -0.25), Vec2::new(-0.9, 0.8)] {
+            let (origin, dir) = cam.ray(ndc, aspect);
+            for t in [0.5, 3.0, 40.0] {
+                let projected = to_ndc(vp, origin + dir * t);
+                assert!(
+                    (projected.truncate() - ndc).length() < 1e-4,
+                    "{ndc} vs {projected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zoom_about_keeps_the_point_on_screen() {
+        let mut cam = OrbitCamera {
+            yaw: 0.3,
+            pitch: 0.2,
+            ..Default::default()
+        };
+        let point = cam.target + Vec3::new(0.4, -0.2, 0.1);
+        let before = to_ndc(cam.view_projection(1.0), point);
+        let back = cam.back();
+        cam.zoom_about(point, 0.5);
+        let after = to_ndc(cam.view_projection(1.0), point);
+        assert!((before.truncate() - after.truncate()).length() < 1e-4);
+        assert!(
+            (cam.back() - back).length() < 1e-6,
+            "view direction is kept"
+        );
+        assert!(cam.eye().distance(point) < 5.0 * 0.6);
+    }
+
+    #[test]
+    fn set_pivot_depth_keeps_the_view() {
+        let mut cam = OrbitCamera {
+            yaw: 1.0,
+            pitch: 0.4,
+            distance: 10.0,
+            ..Default::default()
+        };
+        let view = cam.view_projection(1.0);
+        let point = cam.eye() - cam.back() * 3.0 + Vec3::new(0.5, 0.5, 0.0);
+        cam.set_pivot_depth(point);
+        assert!((cam.distance - (point - cam.eye()).dot(-cam.back())).abs() < 1e-4);
+        assert!(cam.view_projection(1.0).abs_diff_eq(view, 1e-4));
+        let behind = cam.eye() + cam.back();
+        let before = cam;
+        cam.set_pivot_depth(behind);
+        assert_eq!(cam, before, "points behind the camera are ignored");
     }
 
     #[test]

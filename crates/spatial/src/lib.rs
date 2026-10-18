@@ -5,3 +5,8 @@
 //! GPU-side acceleration structures.
 
 #![forbid(unsafe_code)]
+
+mod bvh;
+pub mod triangle;
+
+pub use bvh::{Bvh, ClosestPoint, RayHit};

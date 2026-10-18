@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use polyflow_core::mesh::TriMesh;
 use polyflow_core::primitives;
 use polyflow_render::MeshData;
+use polyflow_spatial::Bvh;
 
 use crate::ui::{FileInfo, MeshInfo, MeshSource};
 
@@ -31,6 +32,7 @@ impl Job {
 pub struct Prepared {
     pub mesh: TriMesh,
     pub gpu_data: MeshData,
+    pub bvh: Bvh,
     pub info: MeshInfo,
 }
 
@@ -60,7 +62,21 @@ pub fn run(job: &Job) -> Result<Prepared, String> {
             )
         }
     };
-    let gpu_data = MeshData::build(&mesh);
+    // Both use all cores; running them together keeps the cores busy through
+    // each one's serial phases.
+    let ((gpu_data, bvh), bvh_build) = {
+        let mut bvh_time = Duration::ZERO;
+        let result = rayon::join(
+            || MeshData::build(&mesh),
+            || {
+                let start = Instant::now();
+                let bvh = Bvh::build(&mesh);
+                bvh_time = start.elapsed();
+                bvh
+            },
+        );
+        (result, bvh_time)
+    };
     let info = MeshInfo {
         name,
         vertices: mesh.vertex_count(),
@@ -68,11 +84,14 @@ pub fn run(job: &Job) -> Result<Prepared, String> {
         meshlets: gpu_data.meshlet_count(),
         source,
         meshlet_build: gpu_data.build_time,
+        bvh_build,
+        bvh_bytes: bvh.memory_bytes(),
         upload: Duration::ZERO,
     };
     Ok(Prepared {
         mesh,
         gpu_data,
+        bvh,
         info,
     })
 }

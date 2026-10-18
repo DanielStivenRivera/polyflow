@@ -1930,6 +1930,8 @@ dependencies = [
  "polyflow-core",
  "polyflow-io",
  "polyflow-render",
+ "polyflow-spatial",
+ "rayon",
  "rfd",
  "winit",
 ]
@@ -1949,6 +1951,8 @@ dependencies = [
  "anyhow",
  "polyflow-core",
  "polyflow-io",
+ "polyflow-spatial",
+ "rayon",
 ]
 
 [[package]]
@@ -1992,7 +1996,9 @@ dependencies = [
 name = "polyflow-spatial"
 version = "0.1.0"
 dependencies = [
+ "log",
  "polyflow-core",
+ "rayon",
 ]
 
 [[package]]

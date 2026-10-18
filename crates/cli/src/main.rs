@@ -9,6 +9,7 @@ use anyhow::{Context as _, bail};
 const USAGE: &str = "\
 Usage:
   polyflow-cli info <mesh.obj>             Load a mesh and print statistics and timings
+  polyflow-cli bvh <mesh.obj>              Build the BVH and time raycasts and closest-point queries
   polyflow-cli torus <rings> <out.obj>     Write a test torus with 2*rings*(rings/2) triangles";
 
 fn main() -> ExitCode {
@@ -20,6 +21,7 @@ fn main() -> ExitCode {
         .as_slice()
     {
         ["info", path] => info(PathBuf::from(path)),
+        ["bvh", path] => bvh(PathBuf::from(path)),
         ["torus", rings, out] => torus(rings, PathBuf::from(out)),
         ["--version" | "-V"] => {
             println!("polyflow-cli {}", env!("CARGO_PKG_VERSION"));
@@ -68,6 +70,72 @@ fn info(path: PathBuf) -> anyhow::Result<()> {
     );
     println!("normals     {:.3} s", secs(loaded.normals_time));
     println!("total       {:.3} s", secs(total));
+    Ok(())
+}
+
+fn bvh(path: PathBuf) -> anyhow::Result<()> {
+    use polyflow_core::glam::Vec3;
+    use rayon::prelude::*;
+
+    let loaded =
+        polyflow_io::load_mesh(&path).with_context(|| format!("loading {}", path.display()))?;
+    let mesh = &loaded.mesh;
+    println!("triangles   {}", mesh.triangle_count());
+
+    let start = Instant::now();
+    let bvh = polyflow_spatial::Bvh::build(mesh);
+    let build = start.elapsed();
+    println!("build       {:.3} s", build.as_secs_f64());
+    println!("nodes       {}", bvh.node_count());
+    println!(
+        "memory      {:.1} MB ({:.1} bytes/triangle)",
+        bvh.memory_bytes() as f64 / (1024.0 * 1024.0),
+        bvh.memory_bytes() as f64 / mesh.triangle_count() as f64
+    );
+
+    // Queries like the viewport's: rays from around the mesh towards random
+    // surface points, and points scattered near the surface.
+    const QUERIES: usize = 200_000;
+    let bounds = mesh.bounds();
+    let radius = bounds.radius();
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut random = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 40) as f32 / (1u64 << 24) as f32
+    };
+    let mut rays = Vec::with_capacity(QUERIES);
+    let mut points = Vec::with_capacity(QUERIES);
+    for _ in 0..QUERIES {
+        let tri = (random() * mesh.triangle_count() as f32) as usize % mesh.triangle_count();
+        let target = mesh.positions[mesh.indices[tri * 3] as usize];
+        let dir = Vec3::new(random() - 0.5, random() - 0.5, random() - 0.5).normalize_or(Vec3::X);
+        rays.push((target + dir * radius * 2.0, -dir));
+        points.push(target + dir * radius * 0.01 * random());
+    }
+
+    let time = |name: &str, f: &(dyn Fn(usize) -> bool + Sync)| {
+        let start = Instant::now();
+        let hits = (0..QUERIES).filter(|&i| f(i)).count();
+        let single = start.elapsed().as_secs_f64() / QUERIES as f64;
+        let start = Instant::now();
+        let _ = (0..QUERIES).into_par_iter().filter(|&i| f(i)).count();
+        let parallel = QUERIES as f64 / start.elapsed().as_secs_f64();
+        println!(
+            "{name:<11} {:.2} us/query on one thread, {:.1} M queries/s on all cores ({:.0}% hit)",
+            single * 1e6,
+            parallel / 1e6,
+            100.0 * hits as f64 / QUERIES as f64
+        );
+    };
+    time("raycast", &|i| {
+        bvh.raycast(mesh, rays[i].0, rays[i].1, f32::INFINITY)
+            .is_some()
+    });
+    time("closest", &|i| {
+        bvh.closest_point(mesh, points[i], f32::INFINITY).is_some()
+    });
     Ok(())
 }
 

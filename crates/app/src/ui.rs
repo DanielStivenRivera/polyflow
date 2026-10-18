@@ -11,6 +11,8 @@ pub struct MeshInfo {
     pub meshlets: usize,
     pub source: MeshSource,
     pub meshlet_build: Duration,
+    pub bvh_build: Duration,
+    pub bvh_bytes: usize,
     pub upload: Duration,
 }
 
@@ -25,6 +27,8 @@ impl MeshInfo {
                 time: Duration::ZERO,
             },
             meshlet_build: Duration::ZERO,
+            bvh_build: Duration::ZERO,
+            bvh_bytes: 0,
             upload: Duration::ZERO,
         }
     }
@@ -55,6 +59,8 @@ pub struct Stats<'a> {
     pub loading: Option<&'a str>,
     /// Culling results of the last completed frame.
     pub culling: Option<polyflow_render::CullStats>,
+    /// Surface under the cursor.
+    pub hover: Option<&'a Hover>,
     /// Smoothed time spent on the CPU per frame, in milliseconds.
     pub cpu_ms: f32,
     /// Smoothed time between frames, in milliseconds; only meaningful when
@@ -62,6 +68,15 @@ pub struct Stats<'a> {
     pub interval_ms: f32,
     /// Smoothed GPU time per frame, in milliseconds, if measurable.
     pub gpu_ms: Option<f32>,
+}
+
+/// The point of the reference mesh under the cursor.
+#[derive(Debug, Clone, Copy)]
+pub struct Hover {
+    pub point: polyflow_core::glam::Vec3,
+    pub triangle: u32,
+    /// Time taken by the raycast.
+    pub query: Duration,
 }
 
 /// Things the user asked for this frame.
@@ -83,6 +98,10 @@ pub struct UiState {
     pub continuous: bool,
     pub backface_culling: bool,
     pub show_meshlets: bool,
+    /// Zoom towards the surface under the cursor instead of the view center.
+    pub zoom_to_cursor: bool,
+    /// Orbit and pan at the depth of the surface under the cursor.
+    pub auto_depth: bool,
     /// Last error to show the user, until dismissed.
     pub error: Option<String>,
 }
@@ -96,6 +115,8 @@ impl Default for UiState {
             continuous: false,
             backface_culling: true,
             show_meshlets: false,
+            zoom_to_cursor: true,
+            auto_depth: true,
             error: None,
         }
     }
@@ -192,6 +213,15 @@ impl UiState {
                     MeshSource::Generated { time } => row(ui, "Generate", &format_duration(*time)),
                 }
                 row(ui, "Meshlets", &format_duration(mesh.meshlet_build));
+                row(
+                    ui,
+                    "BVH",
+                    &format!(
+                        "{} ({})",
+                        format_duration(mesh.bvh_build),
+                        format_bytes(mesh.bvh_bytes as u64)
+                    ),
+                );
                 row(ui, "GPU upload", &format_duration(mesh.upload));
             });
         });
@@ -232,6 +262,33 @@ impl UiState {
                 "Skip back faces. Turn off to see inside open meshes (back faces are tinted).",
             );
         ui.checkbox(&mut self.show_meshlets, "Show meshlets");
+        ui.checkbox(&mut self.zoom_to_cursor, "Zoom to cursor");
+        ui.checkbox(&mut self.auto_depth, "Auto depth")
+            .on_hover_text("Orbit and pan around the depth of the surface under the cursor.");
+
+        ui.separator();
+        ui.strong("Under the cursor");
+        match stats.hover {
+            Some(hover) => {
+                egui::Grid::new("hover").num_columns(2).show(ui, |ui| {
+                    let p = hover.point;
+                    row(
+                        ui,
+                        "Position",
+                        &format!("{:.4}, {:.4}, {:.4}", p.x, p.y, p.z),
+                    );
+                    row(ui, "Triangle", &group_thousands(hover.triangle as usize));
+                    row(
+                        ui,
+                        "Raycast",
+                        &format!("{:.1} µs", hover.query.as_secs_f64() * 1e6),
+                    );
+                });
+            }
+            None => {
+                ui.weak("Nothing");
+            }
+        }
 
         ui.separator();
         ui.collapsing("Performance", |ui| {

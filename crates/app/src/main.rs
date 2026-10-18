@@ -14,6 +14,7 @@ use polyflow_core::camera::OrbitCamera;
 use polyflow_core::glam::{Vec2, Vec3};
 use polyflow_core::mesh::TriMesh;
 use polyflow_render::{FrameInput, MeshView, Renderer, UiFrame, Viewport};
+use polyflow_spatial::Bvh;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
@@ -24,7 +25,7 @@ use crate::bench::Bench;
 use crate::camera_control::CameraController;
 use crate::jobs::{Job, Prepared};
 use crate::options::Options;
-use crate::ui::{Actions, MeshInfo, Stats, UiState};
+use crate::ui::{Actions, Hover, MeshInfo, Stats, UiState};
 
 /// Pixels of a high-resolution wheel/touchpad delta that count as one wheel line.
 const PIXELS_PER_SCROLL_LINE: f32 = 50.0;
@@ -129,7 +130,10 @@ struct AppState {
     ui: UiState,
     /// CPU copy of the reference mesh, for bounds now and spatial queries later.
     mesh: TriMesh,
+    bvh: Bvh,
     mesh_info: MeshInfo,
+    /// Surface under the cursor, updated as the cursor or camera moves.
+    hover: Option<Hover>,
     /// Description of the mesh being prepared on a background thread.
     loading: Option<String>,
     /// Region of the window showing the 3D scene, in physical pixels.
@@ -186,7 +190,9 @@ impl AppState {
             camera: OrbitCamera::default(),
             controller: CameraController::default(),
             mesh: TriMesh::default(),
+            bvh: Bvh::default(),
             mesh_info: MeshInfo::empty(),
+            hover: None,
             loading: None,
             viewport: Viewport {
                 width: size.width as f32,
@@ -240,8 +246,15 @@ impl AppState {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let over_ui = self.pointer_over_ui();
-                self.controller
-                    .mouse_button(button, state == ElementState::Pressed, over_ui);
+                let started =
+                    self.controller
+                        .mouse_button(button, state == ElementState::Pressed, over_ui);
+                if started && self.ui.auto_depth {
+                    self.update_hover();
+                    if let Some(hover) = self.hover {
+                        self.camera.set_pivot_depth(hover.point);
+                    }
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let position = Vec2::new(position.x as f32, position.y as f32);
@@ -251,13 +264,29 @@ impl AppState {
                 {
                     self.window.request_redraw();
                 }
+                if !self.controller.is_dragging() {
+                    self.update_hover();
+                    self.window.request_redraw();
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.hover = None;
+                self.window.request_redraw();
             }
             WindowEvent::MouseWheel { delta, .. } if !self.pointer_over_ui() => {
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / PIXELS_PER_SCROLL_LINE,
                 };
-                self.controller.scroll(lines, &mut self.camera);
+                let factor = CameraController::wheel_factor(lines);
+                self.update_hover();
+                match self.hover {
+                    Some(hover) if self.ui.zoom_to_cursor => {
+                        self.camera.zoom_about(hover.point, factor)
+                    }
+                    _ => self.camera.zoom(factor),
+                }
+                self.update_hover();
                 self.window.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. }
@@ -322,17 +351,21 @@ impl AppState {
         let mut info = prepared.info;
         info.upload = start.elapsed();
         log::info!(
-            "Showing {}: {} vertices, {} triangles, {} meshlets (meshlets built in {:?}, uploaded in {:?})",
+            "Showing {}: {} vertices, {} triangles, {} meshlets (meshlets {:?}, BVH {:?} / {} MB, upload {:?})",
             info.name,
             info.vertices,
             info.triangles,
             info.meshlets,
             info.meshlet_build,
+            info.bvh_build,
+            info.bvh_bytes >> 20,
             info.upload,
         );
         self.window.set_title(&format!("{} — Polyflow", info.name));
         self.mesh_info = info;
         self.mesh = prepared.mesh;
+        self.bvh = prepared.bvh;
+        self.hover = None;
         self.frame_mesh();
         if let Some(factor) = self.initial_zoom.take() {
             self.camera.zoom(1.0 / factor);
@@ -350,6 +383,31 @@ impl AppState {
         if let Some(path) = picked {
             self.start_job(Job::Open(path));
         }
+    }
+
+    /// Raycasts the reference mesh under the cursor.
+    fn update_hover(&mut self) {
+        self.hover = None;
+        let Some(cursor) = self.controller.cursor() else {
+            return;
+        };
+        if self.pointer_over_ui() {
+            return;
+        }
+        let v = self.viewport;
+        let ndc = Vec2::new(
+            (cursor.x - v.x) / v.width * 2.0 - 1.0,
+            (cursor.y - v.y) / v.height * 2.0 - 1.0,
+        );
+        let (origin, dir) = self.camera.ray(ndc, self.viewport_aspect());
+        let start = Instant::now();
+        let hit = self.bvh.raycast(&self.mesh, origin, dir, f32::INFINITY);
+        let query = start.elapsed();
+        self.hover = hit.map(|hit| Hover {
+            point: origin + dir * hit.t,
+            triangle: hit.triangle,
+            query,
+        });
     }
 
     fn frame_mesh(&mut self) {
@@ -385,6 +443,7 @@ impl AppState {
             mesh: &self.mesh_info,
             loading: self.loading.as_deref(),
             culling: self.renderer.cull_stats(),
+            hover: self.hover.as_ref(),
             cpu_ms: self.cpu_ms,
             interval_ms: self.interval_ms,
             gpu_ms: self.gpu_ms,

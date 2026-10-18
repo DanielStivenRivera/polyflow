@@ -37,17 +37,26 @@ impl CameraController {
         self.cursor
     }
 
-    /// Handles a button event. Presses over the UI never start a drag, but
-    /// releases always end one.
-    pub fn mouse_button(&mut self, button: MouseButton, pressed: bool, over_ui: bool) {
+    pub fn is_dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// Camera scale factor for a wheel movement; positive `lines` zoom in.
+    pub fn wheel_factor(lines: f32) -> f32 {
+        ZOOM_PER_WHEEL_LINE.powf(lines)
+    }
+
+    /// Handles a button event and returns true if it started a drag. Presses
+    /// over the UI never start a drag, but releases always end one.
+    pub fn mouse_button(&mut self, button: MouseButton, pressed: bool, over_ui: bool) -> bool {
         if !pressed {
             if self.drag.is_some_and(|(_, b)| b == button) {
                 self.drag = None;
             }
-            return;
+            return false;
         }
         if over_ui || self.drag.is_some() {
-            return;
+            return false;
         }
         let m = self.modifiers;
         let mode = match button {
@@ -59,6 +68,7 @@ impl CameraController {
             _ => None,
         };
         self.drag = mode.map(|mode| (mode, button));
+        self.drag.is_some()
     }
 
     /// Handles cursor motion (physical pixels). Returns true if the camera moved.
@@ -82,11 +92,6 @@ impl CameraController {
             DragMode::Zoom => camera.zoom((delta.y * ZOOM_PER_PIXEL).exp()),
         }
         delta != Vec2::ZERO
-    }
-
-    /// Handles the mouse wheel; positive `lines` zoom in.
-    pub fn scroll(&mut self, lines: f32, camera: &mut OrbitCamera) {
-        camera.zoom(ZOOM_PER_WHEEL_LINE.powf(lines));
     }
 }
 
