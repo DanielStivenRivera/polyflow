@@ -1,0 +1,10 @@
+/target
+
+# IDEs
+.idea/
+.vscode/
+*.iml
+
+# Large test meshes are downloaded, never committed
+/assets/meshes/
+*.blend1

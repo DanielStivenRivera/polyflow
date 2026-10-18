@@ -1,0 +1,20 @@
+[package]
+name = "polyflow-app"
+description = "Polyflow: retopology and baking for high-poly meshes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+polyflow-core.workspace = true
+polyflow-render.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "polyflow"
+path = "src/main.rs"

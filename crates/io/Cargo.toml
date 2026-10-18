@@ -1,0 +1,15 @@
+[package]
+name = "polyflow-io"
+description = "Mesh and image import/export for Polyflow."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+polyflow-core.workspace = true
+
+[lints]
+workspace = true

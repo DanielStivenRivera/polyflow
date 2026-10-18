@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/DanielStivenRivera/polyflow"
+authors = ["Polyflow contributors"]
+
+[workspace.dependencies]
+polyflow-core = { path = "crates/core" }
+polyflow-spatial = { path = "crates/spatial" }
+polyflow-io = { path = "crates/io" }
+polyflow-bake = { path = "crates/bake" }
+polyflow-render = { path = "crates/render" }
+
+glam = "0.30"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+
+# Mesh processing is unusable at opt-level 0; optimize dependencies even in dev.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Release speed with debug info, for Tracy / perf / VTune.
+[profile.profiling]
+inherits = "release"
+debug = true

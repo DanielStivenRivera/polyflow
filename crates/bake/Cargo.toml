@@ -1,0 +1,16 @@
+[package]
+name = "polyflow-bake"
+description = "Texture baking for Polyflow: normals, AO, height and more."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+polyflow-core.workspace = true
+polyflow-spatial.workspace = true
+
+[lints]
+workspace = true
