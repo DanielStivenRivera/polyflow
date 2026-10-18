@@ -137,6 +137,14 @@ impl Tools {
         }
     }
 
+    /// Forgets all per-mesh state, for when the mesh is replaced.
+    pub fn reset(&mut self) {
+        self.cancel();
+        self.drag = None;
+        self.brushing = None;
+        self.clear_hover();
+    }
+
     /// Whether a tool gesture is in progress (camera input should wait).
     pub fn is_busy(&self) -> bool {
         self.drag.is_some() || self.drawing || self.brushing.is_some()

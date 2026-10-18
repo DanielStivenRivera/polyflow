@@ -61,6 +61,12 @@ impl Retopo {
         self.doc.mesh()
     }
 
+    /// Replaces the mesh and its history (e.g. after importing a file).
+    pub fn replace_mesh(&mut self, mesh: HalfEdgeMesh) {
+        self.doc = MeshDocument::new(mesh);
+        self.mesh_overlay_version = None;
+    }
+
     pub fn symmetry(&self) -> Option<Symmetry> {
         self.symmetry_axis
             .map(|axis| Symmetry::new(axis, self.scene_radius))

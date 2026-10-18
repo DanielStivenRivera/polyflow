@@ -99,6 +99,9 @@ pub struct Actions {
     pub redo: bool,
     pub relax_all: bool,
     pub clear_retopo: bool,
+    pub import_retopo: bool,
+    pub save_retopo: bool,
+    pub save_retopo_as: bool,
 }
 
 /// Retopology state the UI shows and edits.
@@ -166,8 +169,18 @@ impl UiState {
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.add(egui::Button::new("Open…").shortcut_text("Ctrl+O")).clicked() {
+                    if ui.add(egui::Button::new("Open reference mesh…").shortcut_text("Ctrl+O")).clicked() {
                         actions.open_file = true;
+                    }
+                    ui.separator();
+                    if ui.add(egui::Button::new("Import retopology…").shortcut_text("Ctrl+I")).clicked() {
+                        actions.import_retopo = true;
+                    }
+                    if ui.add(egui::Button::new("Save retopology").shortcut_text("Ctrl+S")).clicked() {
+                        actions.save_retopo = true;
+                    }
+                    if ui.add(egui::Button::new("Save retopology as…").shortcut_text("Ctrl+Shift+S")).clicked() {
+                        actions.save_retopo_as = true;
                     }
                     ui.separator();
                     if ui.button("Quit").clicked() {
@@ -415,6 +428,7 @@ impl UiState {
                         ("Frame", "F"),
                         ("Open", "Ctrl+O · drop a file"),
                         ("Undo / redo", "Ctrl+Z · Ctrl+Y"),
+                        ("Save retopo", "Ctrl+S"),
                         ("Tools", "Q create · D draw · R relax"),
                         ("Symmetry X", "X"),
                         ("Cancel", "Esc · right click"),

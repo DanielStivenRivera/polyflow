@@ -248,12 +248,12 @@ fn split_mut<T>(mut slice: &mut [T], lengths: impl Iterator<Item = usize>) -> Ve
 }
 
 /// Whitespace-separated scanning within one line.
-struct Cursor<'a> {
+pub(crate) struct Cursor<'a> {
     bytes: &'a [u8],
 }
 
 impl<'a> Cursor<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
+    pub(crate) fn new(bytes: &'a [u8]) -> Self {
         Self { bytes }
     }
 
@@ -266,7 +266,7 @@ impl<'a> Cursor<'a> {
         self.bytes = &self.bytes[n..];
     }
 
-    fn token(&mut self) -> Option<&'a [u8]> {
+    pub(crate) fn token(&mut self) -> Option<&'a [u8]> {
         self.skip_whitespace();
         if self.bytes.is_empty() || self.bytes[0] == b'#' {
             return None;
@@ -281,7 +281,7 @@ impl<'a> Cursor<'a> {
         Some(token)
     }
 
-    fn float(&mut self) -> Option<f32> {
+    pub(crate) fn float(&mut self) -> Option<f32> {
         let token = self.token()?;
         match fast_float2::parse_partial::<f32, _>(token) {
             Ok((value, consumed)) if consumed == token.len() && value.is_finite() => Some(value),
@@ -290,7 +290,7 @@ impl<'a> Cursor<'a> {
     }
 }
 
-fn parse_int(bytes: &[u8]) -> Option<i64> {
+pub(crate) fn parse_int(bytes: &[u8]) -> Option<i64> {
     let (negative, digits) = match bytes {
         [b'-', rest @ ..] => (true, rest),
         [b'+', rest @ ..] => (false, rest),

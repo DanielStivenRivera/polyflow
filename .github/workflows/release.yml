@@ -1,0 +1,80 @@
+name: Release
+
+# Builds release binaries for a pushed version tag (e.g. `v0.1.0`) and
+# publishes them, with the README, changelog and licenses, as a GitHub release.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe: .exe
+          # The oldest supported Ubuntu, so the binary runs on older glibc too.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            exe: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+      - run: cargo build --release --locked -p polyflow -p polyflow-cli
+
+      - name: Stage files
+        shell: bash
+        run: |
+          name="polyflow-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/release/polyflow${{ matrix.exe }}" "target/release/polyflow-cli${{ matrix.exe }}" "$name/"
+          cp README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE "$name/"
+          echo "PACKAGE=$name" >> "$GITHUB_ENV"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "$env:PACKAGE" -DestinationPath "$env:PACKAGE.zip"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: tar czf "$PACKAGE.tar.gz" "$PACKAGE"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE }}
+          path: ${{ env.PACKAGE }}.*
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release notes from the changelog
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '/^## / { if (on) exit; if (index($0, "[" v "]")) on = 1; next } on' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "No changelog section for $version"; exit 1; }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: notes.md
+          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}

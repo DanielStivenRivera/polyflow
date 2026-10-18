@@ -7,6 +7,7 @@ mod options;
 mod retopo;
 mod ui;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -130,6 +131,13 @@ impl ApplicationHandler<UserEvent> for App {
         self.handle(event_loop, result);
     }
 
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Tear down the renderer and window while the display connection is
+        // still open: after `run_app` returns it is gone (on Wayland,
+        // destroying the Vulkan surface then crashes the driver).
+        self.state = None;
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let Some(state) = &mut self.state else { return };
         match state.next_repaint {
@@ -177,6 +185,12 @@ struct AppState {
     tools: Tools,
     /// Hover highlights and tool previews, rebuilt every frame.
     tool_overlay: Overlay,
+    /// File the retopology was last saved to or imported from.
+    retopo_path: Option<PathBuf>,
+    /// Mesh version at the last save, to detect unsaved changes.
+    saved_version: u64,
+    /// Title currently shown, to avoid resetting it every frame.
+    title: String,
 }
 
 impl AppState {
@@ -239,6 +253,9 @@ impl AppState {
             retopo: Retopo::default(),
             tools: Tools::default(),
             tool_overlay: Overlay::default(),
+            retopo_path: None,
+            saved_version: 0,
+            title: String::new(),
             ui,
         };
         let first_job = match &options.mesh {
@@ -263,7 +280,11 @@ impl AppState {
         let viewport_height = self.viewport.height;
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if self.confirm_close() {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::Resized(size) => {
                 self.renderer.resize(size.width, size.height);
                 self.window.request_redraw();
@@ -271,6 +292,7 @@ impl AppState {
             WindowEvent::RedrawRequested => {
                 let actions = self.redraw()?;
                 self.apply_post_frame_actions(event_loop, &actions);
+                self.update_title();
             }
             WindowEvent::DroppedFile(path) => self.start_job(Job::Open(path)),
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -367,6 +389,13 @@ impl AppState {
             Some("z") if ctrl => self.undo(),
             Some("y") if ctrl => self.redo(),
             Some("o") if ctrl => self.open_file_dialog(),
+            Some("i") if ctrl => self.import_retopo(),
+            Some("s") if ctrl && mods.shift_key() => {
+                self.save_retopo(true);
+            }
+            Some("s") if ctrl => {
+                self.save_retopo(false);
+            }
             Some("f") if !ctrl => self.frame_mesh(),
             Some("q") if !ctrl => self.tools.select(ToolKind::Create),
             Some("d") if !ctrl => self.tools.select(ToolKind::Draw),
@@ -396,6 +425,116 @@ impl AppState {
         self.tools.status = None;
         let input = tool_input!(self);
         self.tools.update_hover(&self.retopo, &input);
+    }
+
+    fn retopo_dirty(&self) -> bool {
+        self.retopo.mesh().version() != self.saved_version
+    }
+
+    /// Saves the retopology, asking for a file if there is none yet or
+    /// `ask` is set. Returns whether it was saved.
+    fn save_retopo(&mut self, ask: bool) -> bool {
+        let path = match (&self.retopo_path, ask) {
+            (Some(path), false) => path.clone(),
+            _ => {
+                let picked = rfd::FileDialog::new()
+                    .set_title("Save retopology")
+                    .add_filter("OBJ", &["obj"])
+                    .set_file_name("retopo.obj")
+                    .set_parent(self.window.as_ref())
+                    .save_file();
+                match picked {
+                    Some(path) => path,
+                    None => return false,
+                }
+            }
+        };
+        match polyflow_io::retopo::save(&path, self.retopo.mesh()) {
+            Ok(()) => {
+                self.saved_version = self.retopo.mesh().version();
+                self.tools.status = Some(format!("Saved {}", jobs::display_name(&path)));
+                log::info!("Saved retopology to {}", path.display());
+                self.retopo_path = Some(path);
+                true
+            }
+            Err(e) => {
+                self.ui.error = Some(format!("Could not save {}: {e}", path.display()));
+                false
+            }
+        }
+    }
+
+    fn import_retopo(&mut self) {
+        if self.retopo_dirty()
+            && !self.confirm_discard("Importing replaces the current retopology.")
+        {
+            return;
+        }
+        let picked = rfd::FileDialog::new()
+            .set_title("Import retopology")
+            .add_filter("OBJ", &["obj"])
+            .set_parent(self.window.as_ref())
+            .pick_file();
+        let Some(path) = picked else { return };
+        match polyflow_io::retopo::load(&path) {
+            Ok(imported) => {
+                let faces = imported.mesh.face_count();
+                self.retopo.replace_mesh(imported.mesh);
+                self.tools.reset();
+                self.saved_version = self.retopo.mesh().version();
+                self.tools.status = Some(match imported.skipped_faces {
+                    0 => format!("Imported {faces} faces"),
+                    skipped => format!("Imported {faces} faces; skipped {skipped} invalid ones"),
+                });
+                self.retopo_path = Some(path);
+            }
+            Err(e) => self.ui.error = Some(format!("Could not import {}: {e}", path.display())),
+        }
+    }
+
+    /// Asks before throwing away unsaved retopology. True to go ahead.
+    fn confirm_discard(&mut self, what: &str) -> bool {
+        let answer = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title("Unsaved retopology")
+            .set_description(format!("{what} Save your changes first?"))
+            .set_buttons(rfd::MessageButtons::YesNoCancel)
+            .set_parent(self.window.as_ref())
+            .show();
+        match answer {
+            rfd::MessageDialogResult::Yes => self.save_retopo(false),
+            rfd::MessageDialogResult::No => true,
+            _ => false,
+        }
+    }
+
+    /// True if the app may close (nothing unsaved, or the user decided).
+    fn confirm_close(&mut self) -> bool {
+        !self.retopo_dirty() || self.confirm_discard("The retopology has unsaved changes.")
+    }
+
+    fn update_title(&mut self) {
+        let mut title = String::new();
+        if let Some(path) = &self.retopo_path {
+            title += &jobs::display_name(path);
+        } else if !self.retopo.mesh().is_empty() {
+            title += "Untitled retopology";
+        }
+        if self.retopo_dirty() {
+            title += "*";
+        }
+        if !title.is_empty() {
+            title += " · ";
+        }
+        if self.mesh_info.triangles > 0 {
+            title += &self.mesh_info.name;
+            title += " — ";
+        }
+        title += "Polyflow";
+        if title != self.title {
+            self.window.set_title(&title);
+            self.title = title;
+        }
     }
 
     fn relax_all(&mut self) {
@@ -481,7 +620,6 @@ impl AppState {
             info.bvh_bytes >> 20,
             info.upload,
         );
-        self.window.set_title(&format!("{} — Polyflow", info.name));
         self.mesh_info = info;
         self.mesh = prepared.mesh;
         self.bvh = prepared.bvh;
@@ -708,9 +846,15 @@ impl AppState {
 
     fn apply_post_frame_actions(&mut self, event_loop: &ActiveEventLoop, actions: &Actions) {
         if actions.quit {
-            event_loop.exit();
+            if self.confirm_close() {
+                event_loop.exit();
+            }
         } else if actions.open_file {
             self.open_file_dialog();
+        } else if actions.import_retopo {
+            self.import_retopo();
+        } else if actions.save_retopo || actions.save_retopo_as {
+            self.save_retopo(actions.save_retopo_as);
         }
     }
 

@@ -7,17 +7,23 @@ multi-million-triangle sculpts, and bake the sculpt's detail into texture maps
 (normals, AO, height and more). It is built in Rust on Vulkan, with one rule
 above all: stay fast and stable on the heaviest meshes production throws at it.
 
-> **Status:** early development (pre-v0.1). Not usable yet.
-> See the [roadmap](docs/DESIGN.md#8-roadmap).
+> **Status:** v0.1 preview. Manual retopology works end to end; baking is
+> next. See the [changelog](CHANGELOG.md) and the [roadmap](docs/DESIGN.md#8-roadmap).
+
+## Download
+
+Prebuilt binaries for Windows and Linux are attached to each
+[release](https://github.com/DanielStivenRivera/polyflow/releases). Unzip and
+run `polyflow` (or `polyflow.exe`).
 
 ## Platforms
 
 - Windows 10/11
 - Linux (X11 and Wayland)
 
-Requires a GPU with Vulkan 1.3 support. Hardware ray tracing is used for baking
-when available, with a compute fallback otherwise. macOS ports are welcome from
-the community.
+Requires a GPU and driver with Vulkan 1.3 (any desktop GPU from roughly 2016
+on, with current drivers). On Linux, the Vulkan loader (`libvulkan1`) and an X11
+or Wayland session are needed. macOS ports are welcome from the community.
 
 ## Building
 
@@ -32,8 +38,8 @@ You need a stable Rust toolchain (installed automatically from
 
 ## Usage
 
-Open a reference mesh (`.obj` for now) with **File → Open** (Ctrl+O), by
-dropping it on the window, or from the command line:
+Open a reference mesh (`.obj` for now) with **File → Open reference mesh**
+(Ctrl+O), by dropping it on the window, or from the command line:
 
 ```sh
 polyflow path/to/sculpt.obj
@@ -54,6 +60,9 @@ F to frame the mesh.
 Symmetry (X toggles it on the X axis) mirrors every edit. Ctrl+Z / Ctrl+Y undo
 and redo; Esc or a right click cancels the face in progress. If the retopo
 mesh sinks under strongly curved areas, raise *Offset* in the Retopology panel.
+
+Save the retopology with **File → Save retopology** (Ctrl+S) as an OBJ that
+keeps its quads, and bring it back with **Import retopology** (Ctrl+I).
 
 The headless `polyflow-cli` loads meshes without a window, which is handy for
 pipelines and for benchmarking:
