@@ -4,6 +4,7 @@ mod bench;
 mod camera_control;
 mod jobs;
 mod options;
+mod retopo;
 mod ui;
 
 use std::sync::Arc;
@@ -13,24 +14,48 @@ use anyhow::Context as _;
 use polyflow_core::camera::OrbitCamera;
 use polyflow_core::glam::{Vec2, Vec3};
 use polyflow_core::mesh::TriMesh;
-use polyflow_render::{FrameInput, MeshView, Renderer, UiFrame, Viewport};
+use polyflow_render::{FrameInput, MeshView, Overlay, OverlayStyle, Renderer, UiFrame, Viewport};
 use polyflow_spatial::Bvh;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::Key;
 use winit::window::{Window, WindowId};
 
 use crate::bench::Bench;
 use crate::camera_control::CameraController;
 use crate::jobs::{Job, Prepared};
 use crate::options::Options;
-use crate::ui::{Actions, Hover, MeshInfo, Stats, UiState};
+use crate::retopo::Retopo;
+use crate::retopo::surface::Surface;
+use crate::retopo::symmetry::Axis;
+use crate::retopo::tools::{self, ToolInput, ToolKind, Tools};
+use crate::retopo::view::ViewInfo;
+use crate::ui::{Actions, Hover, MeshInfo, RetopoUi, Stats, UiState};
 
 /// Pixels of a high-resolution wheel/touchpad delta that count as one wheel line.
 const PIXELS_PER_SCROLL_LINE: f32 = 50.0;
 /// Linear RGB.
 const BACKGROUND: Vec3 = Vec3::new(0.018, 0.020, 0.024);
+
+/// Builds a [`ToolInput`] from `AppState` fields, borrowing only the
+/// reference mesh so tools and the retopo state can be borrowed mutably.
+macro_rules! tool_input {
+    ($state:expr) => {
+        ToolInput {
+            surface: Surface {
+                mesh: &$state.mesh,
+                bvh: &$state.bvh,
+            },
+            view: ViewInfo {
+                camera: $state.camera,
+                viewport: $state.viewport,
+            },
+            cursor: $state.controller.cursor().unwrap_or_default(),
+            modifiers: $state.controller.modifiers,
+        }
+    };
+}
 
 /// Events sent to the event loop from other threads.
 #[derive(Debug)]
@@ -148,6 +173,10 @@ struct AppState {
     bench: Option<Bench>,
     /// `--zoom` factor, applied when the first mesh is framed.
     initial_zoom: Option<f32>,
+    retopo: Retopo,
+    tools: Tools,
+    /// Hover highlights and tool previews, rebuilt every frame.
+    tool_overlay: Overlay,
 }
 
 impl AppState {
@@ -207,6 +236,9 @@ impl AppState {
             bench_duration: options.bench,
             bench: None,
             initial_zoom: options.zoom,
+            retopo: Retopo::default(),
+            tools: Tools::default(),
+            tool_overlay: Overlay::default(),
             ui,
         };
         let first_job = match &options.mesh {
@@ -245,16 +277,30 @@ impl AppState {
                 self.controller.modifiers = modifiers.state()
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                let pressed = state == ElementState::Pressed;
                 let over_ui = self.pointer_over_ui();
                 let started =
-                    self.controller
-                        .mouse_button(button, state == ElementState::Pressed, over_ui);
-                if started && self.ui.auto_depth {
-                    self.update_hover();
-                    if let Some(hover) = self.hover {
-                        self.camera.set_pivot_depth(hover.point);
+                    !self.tools.is_busy() && self.controller.mouse_button(button, pressed, over_ui);
+                if !pressed {
+                    // Releases always reach both, so no gesture gets stuck.
+                    self.controller.mouse_button(button, false, over_ui);
+                    let input = tool_input!(self);
+                    self.tools.mouse_up(&mut self.retopo, &input, button);
+                } else if started {
+                    if self.ui.auto_depth {
+                        self.update_hover();
+                        if let Some(hover) = self.hover {
+                            self.camera.set_pivot_depth(hover.point);
+                        }
                     }
+                } else if !over_ui
+                    && !self.controller.is_dragging()
+                    && !self.controller.modifiers.alt_key()
+                {
+                    let input = tool_input!(self);
+                    self.tools.mouse_down(&mut self.retopo, &input, button);
                 }
+                self.window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let position = Vec2::new(position.x as f32, position.y as f32);
@@ -266,11 +312,18 @@ impl AppState {
                 }
                 if !self.controller.is_dragging() {
                     self.update_hover();
+                    if self.pointer_over_ui() && !self.tools.is_busy() {
+                        self.tools.clear_hover();
+                    } else {
+                        let input = tool_input!(self);
+                        self.tools.mouse_move(&mut self.retopo, &input);
+                    }
                     self.window.request_redraw();
                 }
             }
             WindowEvent::CursorLeft { .. } => {
                 self.hover = None;
+                self.tools.clear_hover();
                 self.window.request_redraw();
             }
             WindowEvent::MouseWheel { delta, .. } if !self.pointer_over_ui() => {
@@ -287,27 +340,94 @@ impl AppState {
                     _ => self.camera.zoom(factor),
                 }
                 self.update_hover();
+                let input = tool_input!(self);
+                self.tools.update_hover(&self.retopo, &input);
                 self.window.request_redraw();
             }
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed && !response.consumed && !event.repeat =>
             {
-                let ctrl = self.controller.modifiers.control_key();
-                match &event.logical_key {
-                    Key::Character(c) if c.eq_ignore_ascii_case("o") && ctrl => {
-                        self.open_file_dialog()
-                    }
-                    Key::Character(c) if c.eq_ignore_ascii_case("f") && !ctrl => {
-                        self.frame_mesh();
-                        self.window.request_redraw();
-                    }
-                    Key::Named(NamedKey::Escape) => event_loop.exit(),
-                    _ => {}
-                }
+                self.key_pressed(event_loop, &event.logical_key);
+                self.window.request_redraw();
             }
             _ => {}
         }
         Ok(())
+    }
+
+    fn key_pressed(&mut self, _event_loop: &ActiveEventLoop, key: &Key) {
+        let mods = self.controller.modifiers;
+        let ctrl = mods.control_key();
+        let character = match key {
+            Key::Character(c) => Some(c.to_ascii_lowercase()),
+            _ => None,
+        };
+        match character.as_deref() {
+            Some("z") if ctrl && mods.shift_key() => self.redo(),
+            Some("z") if ctrl => self.undo(),
+            Some("y") if ctrl => self.redo(),
+            Some("o") if ctrl => self.open_file_dialog(),
+            Some("f") if !ctrl => self.frame_mesh(),
+            Some("q") if !ctrl => self.tools.select(ToolKind::Create),
+            Some("d") if !ctrl => self.tools.select(ToolKind::Draw),
+            Some("r") if !ctrl => self.tools.select(ToolKind::Relax),
+            Some("x") if !ctrl => {
+                self.retopo.symmetry_axis = match self.retopo.symmetry_axis {
+                    Some(Axis::X) => None,
+                    _ => Some(Axis::X),
+                };
+            }
+            _ => {
+                let input = tool_input!(self);
+                self.tools.key(&mut self.retopo, &input, key);
+            }
+        }
+    }
+
+    fn undo(&mut self) {
+        self.retopo.doc.undo();
+        self.tools.status = None;
+        let input = tool_input!(self);
+        self.tools.update_hover(&self.retopo, &input);
+    }
+
+    fn redo(&mut self) {
+        self.retopo.doc.redo();
+        self.tools.status = None;
+        let input = tool_input!(self);
+        self.tools.update_hover(&self.retopo, &input);
+    }
+
+    fn relax_all(&mut self) {
+        let vertices: Vec<_> = self.retopo.mesh().vertices().collect();
+        let weights = vec![self.tools.settings.brush_strength; vertices.len()];
+        let surface = Surface {
+            mesh: &self.mesh,
+            bvh: &self.bvh,
+        };
+        let borders = self.tools.settings.relax_borders;
+        tools::relax(
+            &mut self.retopo,
+            &surface,
+            &vertices,
+            &weights,
+            borders,
+            None,
+        );
+    }
+
+    fn clear_retopo(&mut self) {
+        let _ = self.retopo.doc.edit("Clear retopology", |m| {
+            let faces: Vec<_> = m.faces().collect();
+            for f in faces {
+                m.remove_face(f, false)?;
+            }
+            let vertices: Vec<_> = m.vertices().collect();
+            for v in vertices {
+                m.remove_vertex(v)?;
+            }
+            Ok::<_, polyflow_core::halfedge::TopologyError>(())
+        });
     }
 
     /// Prepares a mesh on a background thread; the result arrives as a
@@ -365,6 +485,7 @@ impl AppState {
         self.mesh_info = info;
         self.mesh = prepared.mesh;
         self.bvh = prepared.bvh;
+        self.retopo.scene_radius = self.mesh.bounds().radius().max(1e-6);
         self.hover = None;
         self.frame_mesh();
         if let Some(factor) = self.initial_zoom.take() {
@@ -437,6 +558,7 @@ impl AppState {
             smooth(self.gpu_ms.get_or_insert(ms), ms);
         }
 
+        let cursor_in_viewport = !self.pointer_over_ui();
         let stats = Stats {
             gpu: self.renderer.device_name(),
             present_mode: self.renderer.present_mode_name(),
@@ -447,13 +569,32 @@ impl AppState {
             cpu_ms: self.cpu_ms,
             interval_ms: self.interval_ms,
             gpu_ms: self.gpu_ms,
+            brush: {
+                let input = tool_input!(self);
+                self.tools.brush_circle(&input, cursor_in_viewport)
+            },
+            cursor_in_viewport,
+        };
+        let face_kinds = self.retopo.face_kinds();
+        let mut retopo_ui = RetopoUi {
+            tool: &mut self.tools.active,
+            settings: &mut self.tools.settings,
+            symmetry: &mut self.retopo.symmetry_axis,
+            x_ray: &mut self.retopo.x_ray,
+            surface_offset: &mut self.retopo.surface_offset,
+            status: &mut self.tools.status,
+            undo_name: self.retopo.doc.undo_name(),
+            redo_name: self.retopo.doc.redo_name(),
+            vertices: self.retopo.doc.mesh().vertex_count(),
+            faces: self.retopo.doc.mesh().face_count(),
+            face_kinds,
         };
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut actions = Actions::default();
         let mut viewport_rect = egui::Rect::NOTHING;
         let ui_state = &mut self.ui;
         let output = self.egui_state.egui_ctx().run_ui(raw_input, |ui| {
-            (actions, viewport_rect) = ui_state.show(ui, &stats)
+            (actions, viewport_rect) = ui_state.show(ui, &stats, &mut retopo_ui)
         });
         self.egui_state
             .handle_platform_output(&self.window, output.platform_output);
@@ -477,19 +618,42 @@ impl AppState {
         if actions.frame_mesh {
             self.frame_mesh();
         }
+        if actions.undo {
+            self.undo();
+        }
+        if actions.redo {
+            self.redo();
+        }
+        if actions.relax_all {
+            self.relax_all();
+        }
+        if actions.clear_retopo {
+            self.clear_retopo();
+        }
+        self.tools.overlay(&self.retopo, &mut self.tool_overlay);
+        let x_ray = self.retopo.x_ray;
+        let surface_offset = self.retopo.surface_offset;
+        let view_proj = self.camera.view_projection(self.viewport_aspect());
+        let mesh_overlay = self.retopo.mesh_overlay();
         self.renderer.set_vsync(self.ui.vsync);
 
         let [r, g, b] = self.ui.mesh_color;
         self.renderer.render(FrameInput {
             viewport: self.viewport,
             view: MeshView {
-                view_proj: self.camera.view_projection(self.viewport_aspect()),
+                view_proj,
                 eye: self.camera.eye(),
                 color: Vec3::new(r, g, b),
                 backface_culling: self.ui.backface_culling,
                 show_meshlets: self.ui.show_meshlets,
             },
             clear_color: BACKGROUND,
+            overlays: &[mesh_overlay, &self.tool_overlay],
+            overlay_style: OverlayStyle {
+                line_width: 1.5 * ppp,
+                x_ray,
+                surface_offset,
+            },
             ui: Some(UiFrame {
                 primitives: &primitives,
                 textures: output.textures_delta,

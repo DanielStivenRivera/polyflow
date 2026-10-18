@@ -122,7 +122,8 @@ impl GpuContext {
         let device_extensions = [swapchain::NAME.as_ptr()];
         let mut features13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
-            .synchronization2(true);
+            .synchronization2(true)
+            .shader_demote_to_helper_invocation(true);
         let mut features12 = vk::PhysicalDeviceVulkan12Features::default()
             .buffer_device_address(true)
             .draw_indirect_count(true);
@@ -327,6 +328,7 @@ fn supports_required_features(instance: &Instance, pd: vk::PhysicalDevice) -> bo
     [
         features13.dynamic_rendering,
         features13.synchronization2,
+        features13.shader_demote_to_helper_invocation,
         features12.buffer_device_address,
         features12.draw_indirect_count,
         core.multi_draw_indirect,

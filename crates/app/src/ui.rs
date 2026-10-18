@@ -2,6 +2,11 @@
 
 use std::time::Duration;
 
+use polyflow_core::glam::Vec2;
+
+use crate::retopo::symmetry::Axis;
+use crate::retopo::tools::{ToolKind, ToolSettings};
+
 /// Description of the mesh currently displayed.
 #[derive(Debug, Clone)]
 pub struct MeshInfo {
@@ -68,6 +73,10 @@ pub struct Stats<'a> {
     pub interval_ms: f32,
     /// Smoothed GPU time per frame, in milliseconds, if measurable.
     pub gpu_ms: Option<f32>,
+    /// Relax brush outline (center and radius, physical pixels).
+    pub brush: Option<(Vec2, f32)>,
+    /// Whether the pointer is over the 3D viewport (for the cursor shape).
+    pub cursor_in_viewport: bool,
 }
 
 /// The point of the reference mesh under the cursor.
@@ -86,6 +95,27 @@ pub struct Actions {
     pub regenerate_mesh: bool,
     pub frame_mesh: bool,
     pub quit: bool,
+    pub undo: bool,
+    pub redo: bool,
+    pub relax_all: bool,
+    pub clear_retopo: bool,
+}
+
+/// Retopology state the UI shows and edits.
+#[derive(Debug)]
+pub struct RetopoUi<'a> {
+    pub tool: &'a mut ToolKind,
+    pub settings: &'a mut ToolSettings,
+    pub symmetry: &'a mut Option<Axis>,
+    pub x_ray: &'a mut bool,
+    pub surface_offset: &'a mut f32,
+    pub status: &'a mut Option<String>,
+    pub undo_name: Option<&'a str>,
+    pub redo_name: Option<&'a str>,
+    pub vertices: usize,
+    pub faces: usize,
+    /// Triangles, quads and other polygons.
+    pub face_kinds: [usize; 3],
 }
 
 #[derive(Debug)]
@@ -125,7 +155,12 @@ impl Default for UiState {
 impl UiState {
     /// Draws the UI. Returns the requested actions and the rect left for the
     /// 3D viewport, in points.
-    pub fn show(&mut self, ui: &mut egui::Ui, stats: &Stats<'_>) -> (Actions, egui::Rect) {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        stats: &Stats<'_>,
+        retopo: &mut RetopoUi<'_>,
+    ) -> (Actions, egui::Rect) {
         let mut actions = Actions::default();
 
         egui::Panel::top("menu_bar").show(ui, |ui| {
@@ -135,8 +170,20 @@ impl UiState {
                         actions.open_file = true;
                     }
                     ui.separator();
-                    if ui.add(egui::Button::new("Quit").shortcut_text("Esc")).clicked() {
+                    if ui.button("Quit").clicked() {
                         actions.quit = true;
+                    }
+                });
+                ui.menu_button("Edit", |ui| {
+                    let undo = retopo.undo_name.map_or("Undo".to_owned(), |n| format!("Undo {n}"));
+                    let button = egui::Button::new(undo).shortcut_text("Ctrl+Z");
+                    if ui.add_enabled(retopo.undo_name.is_some(), button).clicked() {
+                        actions.undo = true;
+                    }
+                    let redo = retopo.redo_name.map_or("Redo".to_owned(), |n| format!("Redo {n}"));
+                    let button = egui::Button::new(redo).shortcut_text("Ctrl+Y");
+                    if ui.add_enabled(retopo.redo_name.is_some(), button).clicked() {
+                        actions.redo = true;
                     }
                 });
                 ui.menu_button("View", |ui| {
@@ -160,9 +207,28 @@ impl UiState {
             .exact_size(260.0)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    retopo_panel(ui, retopo, &mut actions);
+                    ui.separator();
                     self.side_panel(ui, stats, &mut actions);
                 });
             });
+
+        let ppp = ui.ctx().pixels_per_point();
+        if let Some((center, radius)) = stats.brush {
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("brush"),
+            ));
+            let center = egui::pos2(center.x / ppp, center.y / ppp);
+            painter.circle_stroke(
+                center,
+                radius / ppp,
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 214, 64)),
+            );
+        }
+        if stats.cursor_in_viewport {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
 
         (actions, ui.available_rect_before_wrap())
     }
@@ -348,11 +414,126 @@ impl UiState {
                         ("Zoom", "Wheel · Ctrl+MMB · Alt+RMB"),
                         ("Frame", "F"),
                         ("Open", "Ctrl+O · drop a file"),
+                        ("Undo / redo", "Ctrl+Z · Ctrl+Y"),
+                        ("Tools", "Q create · D draw · R relax"),
+                        ("Symmetry X", "X"),
+                        ("Cancel", "Esc · right click"),
                     ] {
                         row(ui, action, binding);
                     }
                 });
         });
+    }
+}
+
+fn retopo_panel(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Actions) {
+    ui.strong("Retopology");
+    ui.horizontal(|ui| {
+        for tool in ToolKind::ALL {
+            ui.selectable_value(retopo.tool, tool, tool.label())
+                .on_hover_text(format!("{} ({})", tool_help(tool), tool.shortcut()));
+        }
+    });
+    match retopo.tool {
+        ToolKind::Create => {
+            ui.weak("Click the surface to add vertices; 4 make a quad. Click the first vertex to close a polygon.");
+        }
+        ToolKind::Draw => {
+            ui.add(
+                egui::Slider::new(&mut retopo.settings.strip_width, 10.0..=200.0)
+                    .text("Width (px)"),
+            );
+        }
+        ToolKind::Relax => {
+            ui.add(
+                egui::Slider::new(&mut retopo.settings.brush_radius, 10.0..=400.0)
+                    .text("Radius (px)"),
+            );
+            ui.add(
+                egui::Slider::new(&mut retopo.settings.brush_strength, 0.05..=1.0).text("Strength"),
+            );
+            ui.checkbox(&mut retopo.settings.relax_borders, "Relax borders")
+                .on_hover_text(
+                    "Also smooth border vertices (along the border). Off keeps borders pinned.",
+                );
+        }
+    }
+    ui.horizontal(|ui| {
+        ui.label("Symmetry");
+        ui.selectable_value(retopo.symmetry, None, "Off");
+        for axis in [Axis::X, Axis::Y, Axis::Z] {
+            ui.selectable_value(retopo.symmetry, Some(axis), axis.label());
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.checkbox(retopo.x_ray, "X-ray")
+            .on_hover_text("Show and pick the retopo mesh through the surface.");
+        let mut percent = *retopo.surface_offset * 100.0;
+        let slider = egui::Slider::new(&mut percent, 0.0..=5.0)
+            .text("Offset %")
+            .max_decimals(1);
+        let hint = "Draw the retopo mesh this far in front of the surface, so its faces do not sink under it.";
+        if ui.add(slider).on_hover_text(hint).changed() {
+            *retopo.surface_offset = percent / 100.0;
+        }
+    });
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(retopo.undo_name.is_some(), egui::Button::new("Undo"))
+            .clicked()
+        {
+            actions.undo = true;
+        }
+        if ui
+            .add_enabled(retopo.redo_name.is_some(), egui::Button::new("Redo"))
+            .clicked()
+        {
+            actions.redo = true;
+        }
+        if ui
+            .add_enabled(retopo.vertices > 0, egui::Button::new("Relax all"))
+            .clicked()
+        {
+            actions.relax_all = true;
+        }
+    });
+    egui::Grid::new("retopo_stats")
+        .num_columns(2)
+        .show(ui, |ui| {
+            row(ui, "Vertices", &group_thousands(retopo.vertices));
+            let [tris, quads, ngons] = retopo.face_kinds;
+            row(
+                ui,
+                "Faces",
+                &format!(
+                    "{} ({} quads, {} tris, {} n-gons)",
+                    group_thousands(retopo.faces),
+                    quads,
+                    tris,
+                    ngons
+                ),
+            );
+        });
+    if retopo.vertices > 0 && ui.small_button("Clear retopology").clicked() {
+        actions.clear_retopo = true;
+    }
+    if let Some(status) = retopo.status.clone() {
+        ui.horizontal(|ui| {
+            ui.colored_label(ui.visuals().warn_fg_color, status);
+            if ui.small_button("×").clicked() {
+                *retopo.status = None;
+            }
+        });
+    }
+}
+
+fn tool_help(tool: ToolKind) -> &'static str {
+    match tool {
+        ToolKind::Create => {
+            "Place vertices and build faces. Ctrl+drag moves a vertex, Delete removes what is under the cursor"
+        }
+        ToolKind::Draw => "Drag over the surface to draw a strip of quads",
+        ToolKind::Relax => "Drag to smooth the retopo mesh, keeping it on the surface",
     }
 }
 

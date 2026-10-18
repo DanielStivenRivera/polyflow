@@ -5,13 +5,14 @@ use std::sync::Arc;
 use ash::vk;
 use egui_ash_renderer::allocator::GpuAllocator;
 use egui_ash_renderer::{DynamicRendering, Options, RenderMode};
-use polyflow_core::glam::Vec3;
+use polyflow_core::glam::{Vec2, Vec3};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::RenderError;
 use crate::context::GpuContext;
 use crate::memory::{GpuImage, subresource_range};
 use crate::mesh::{CullStats, GpuMesh, MeshData, MeshPipeline, MeshView};
+use crate::overlay::{Overlay, OverlayRenderer, OverlayStyle};
 use crate::swapchain::Swapchain;
 use crate::timer::GpuTimer;
 
@@ -27,6 +28,9 @@ pub struct FrameInput<'a> {
     pub view: MeshView,
     /// Linear RGB.
     pub clear_color: Vec3,
+    /// Geometry drawn over the reference mesh (retopology mesh, tool previews).
+    pub overlays: &'a [&'a Overlay],
+    pub overlay_style: OverlayStyle,
     pub ui: Option<UiFrame<'a>>,
 }
 
@@ -85,6 +89,7 @@ pub struct Renderer {
     frames: Vec<Frame>,
     frame_index: usize,
     mesh_pipeline: MeshPipeline,
+    overlay: OverlayRenderer,
     mesh: Option<GpuMesh>,
     timer: GpuTimer,
     /// GPU time of the most recently completed frame.
@@ -158,6 +163,7 @@ impl Renderer {
         let depth_format = pick_depth_format(&ctx)?;
         let depth = create_depth(&ctx, swapchain.extent, depth_format)?;
         let mesh_pipeline = MeshPipeline::new(&ctx, swapchain.format, depth_format)?;
+        let overlay = OverlayRenderer::new(&ctx, swapchain.format, depth_format)?;
         let timer = GpuTimer::new(&ctx)?;
         let egui = egui_ash_renderer::Renderer::with_gpu_allocator(
             Arc::clone(&ctx.allocator),
@@ -182,6 +188,7 @@ impl Renderer {
             frames,
             frame_index: 0,
             mesh_pipeline,
+            overlay,
             mesh: None,
             timer,
             gpu_time: None,
@@ -279,6 +286,8 @@ impl Renderer {
         {
             self.cull_stats = Some(stats);
         }
+        self.overlay
+            .upload(&self.ctx, self.frame_index, input.overlays)?;
 
         let egui = self.egui.as_mut().expect("egui renderer lives until drop");
         for id in frame.textures_to_free.drain(..) {
@@ -438,7 +447,7 @@ impl Renderer {
                 .depth_attachment(&depth_attachment);
             device.cmd_begin_rendering(cmd, &rendering);
 
-            if let (Some(mesh), Some(rect)) = (&self.mesh, input.viewport.clamped_rect(extent)) {
+            if let Some(rect) = input.viewport.clamped_rect(extent) {
                 let viewport = vk::Viewport {
                     x: rect.offset.x as f32,
                     y: rect.offset.y as f32,
@@ -449,8 +458,19 @@ impl Renderer {
                 };
                 device.cmd_set_viewport(cmd, 0, &[viewport]);
                 device.cmd_set_scissor(cmd, 0, &[rect]);
-                self.mesh_pipeline
-                    .draw(device, cmd, mesh, self.frame_index, &input.view);
+                if let Some(mesh) = &self.mesh {
+                    self.mesh_pipeline
+                        .draw(device, cmd, mesh, self.frame_index, &input.view);
+                }
+                self.overlay.draw(
+                    device,
+                    cmd,
+                    self.frame_index,
+                    input.view.view_proj,
+                    input.view.eye,
+                    Vec2::new(rect.extent.width as f32, rect.extent.height as f32),
+                    &input.overlay_style,
+                );
             }
 
             // The UI renderer sets its own viewport and scissors.
@@ -522,6 +542,7 @@ impl Drop for Renderer {
                 mesh.destroy(&self.ctx);
             }
             self.mesh_pipeline.destroy(&self.ctx);
+            self.overlay.destroy(&self.ctx);
             self.timer.destroy(&self.ctx);
             self.depth.destroy(&self.ctx);
             self.swapchain.destroy(&self.ctx);

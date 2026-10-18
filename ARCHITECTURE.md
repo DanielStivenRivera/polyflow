@@ -25,7 +25,7 @@ crates/
 ├─ io       polyflow-io       importers, exporters, binary cache
 ├─ bake     polyflow-bake     baking (CPU reference + GPU)
 ├─ render   polyflow-render   Vulkan renderer (ash)
-├─ app      polyflow          UI, tools, viewport      → binary `polyflow`
+├─ app      polyflow          UI, retopo tools, viewport → binary `polyflow`
 └─ cli      polyflow-cli      headless batch operations → binary `polyflow-cli`
 ```
 
