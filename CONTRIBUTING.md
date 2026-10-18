@@ -25,6 +25,21 @@ CI runs the same checks on Windows and Linux.
 - Keep pull requests focused; one change per PR.
 - Write code, comments and commit messages in English.
 
+## Shaders
+
+Shaders are written in [Slang](https://shader-slang.org/) under
+`crates/render/shaders/` and compiled to SPIR-V by the render crate's build
+script, using `slangc` from the [Vulkan SDK](https://vulkan.lunarg.com/) (or
+`$SLANGC`). Precompiled SPIR-V is committed in `crates/render/shaders/spirv/`
+so the project builds without the SDK; when you change a shader with `slangc`
+available, the build refreshes that folder — commit it with your change.
+
+## Debugging the renderer
+
+Vulkan validation layers are enabled in debug builds when the Vulkan SDK is
+installed. Set `POLYFLOW_VALIDATION=0` or `1` to override, and
+`POLYFLOW_GPU=<name substring>` to pick a specific GPU.
+
 ## Profiling
 
 Use the `profiling` profile for optimized builds with debug info:

@@ -6,4 +6,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bounds;
+pub mod camera;
+pub mod primitives;
+
 pub use glam;

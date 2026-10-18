@@ -23,7 +23,7 @@ the community.
 
 ```sh
 cargo build --release
-cargo run --release -p polyflow-app
+cargo run --release
 ```
 
 You need a stable Rust toolchain (installed automatically from

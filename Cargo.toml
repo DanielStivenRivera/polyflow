@@ -1,11 +1,13 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# `cargo run` at the root launches the app.
+default-members = ["crates/app"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/DanielStivenRivera/polyflow"
 authors = ["Polyflow contributors"]
@@ -17,7 +19,20 @@ polyflow-io = { path = "crates/io" }
 polyflow-bake = { path = "crates/bake" }
 polyflow-render = { path = "crates/render" }
 
-glam = "0.30"
+glam = { version = "0.30", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+ash = "0.38"
+ash-window = "0.13"
+raw-window-handle = "0.6"
+gpu-allocator = { version = "0.28", default-features = false, features = ["std", "vulkan"] }
+winit = "0.30"
+egui = "0.36"
+egui-winit = { version = "0.36", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
+egui-ash-renderer = { version = "0.13", features = ["gpu-allocator"] }
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+thiserror = "2"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

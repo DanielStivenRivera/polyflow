@@ -10,6 +10,15 @@ authors.workspace = true
 
 [dependencies]
 polyflow-core.workspace = true
+ash.workspace = true
+ash-window.workspace = true
+raw-window-handle.workspace = true
+gpu-allocator.workspace = true
+egui.workspace = true
+egui-ash-renderer.workspace = true
+bytemuck.workspace = true
+log.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

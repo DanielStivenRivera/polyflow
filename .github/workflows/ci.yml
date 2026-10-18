@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.95
       - uses: Swatinem/rust-cache@v2
-      # `+1.85` overrides rust-toolchain.toml, which pins `stable`.
-      - run: cargo +1.85 check --workspace
+      # `+1.95` overrides rust-toolchain.toml, which pins `stable`.
+      - run: cargo +1.95 check --workspace

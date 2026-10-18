@@ -1,5 +1,5 @@
 [package]
-name = "polyflow-app"
+name = "polyflow"
 description = "Polyflow: retopology and baking for high-poly meshes."
 version.workspace = true
 edition.workspace = true
@@ -11,6 +11,12 @@ authors.workspace = true
 [dependencies]
 polyflow-core.workspace = true
 polyflow-render.workspace = true
+winit.workspace = true
+egui.workspace = true
+egui-winit.workspace = true
+log.workspace = true
+env_logger.workspace = true
+anyhow.workspace = true
 
 [lints]
 workspace = true
