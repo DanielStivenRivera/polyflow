@@ -1,9 +1,11 @@
 //! Polyflow desktop application.
 
+mod bench;
 mod camera_control;
+mod jobs;
+mod options;
 mod ui;
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,17 +13,18 @@ use anyhow::Context as _;
 use polyflow_core::camera::OrbitCamera;
 use polyflow_core::glam::{Vec2, Vec3};
 use polyflow_core::mesh::TriMesh;
-use polyflow_core::primitives;
-use polyflow_io::{LoadError, LoadedMesh};
-use polyflow_render::{FrameInput, Renderer, UiFrame, Viewport};
+use polyflow_render::{FrameInput, MeshView, Renderer, UiFrame, Viewport};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::bench::Bench;
 use crate::camera_control::CameraController;
-use crate::ui::{Actions, FileInfo, MeshInfo, Stats, UiState};
+use crate::jobs::{Job, Prepared};
+use crate::options::Options;
+use crate::ui::{Actions, MeshInfo, Stats, UiState};
 
 /// Pixels of a high-resolution wheel/touchpad delta that count as one wheel line.
 const PIXELS_PER_SCROLL_LINE: f32 = 50.0;
@@ -31,20 +34,28 @@ const BACKGROUND: Vec3 = Vec3::new(0.018, 0.020, 0.024);
 /// Events sent to the event loop from other threads.
 #[derive(Debug)]
 enum UserEvent {
-    MeshLoaded {
-        path: PathBuf,
-        result: Box<Result<LoadedMesh, LoadError>>,
-    },
+    MeshReady(Box<Result<Prepared, String>>),
 }
 
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let options = match options::parse(std::env::args_os().skip(1)) {
+        options::ParseResult::Run(options) => options,
+        options::ParseResult::Help => {
+            println!("{}", options::USAGE);
+            return Ok(());
+        }
+        options::ParseResult::Error(e) => {
+            eprintln!("error: {e}\n\n{}", options::USAGE);
+            std::process::exit(2);
+        }
+    };
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let mut app = App {
         state: None,
         error: None,
         proxy: event_loop.create_proxy(),
-        initial_file: std::env::args_os().nth(1).map(PathBuf::from),
+        options: Some(options),
     };
     event_loop.run_app(&mut app)?;
     app.error.map_or(Ok(()), Err)
@@ -54,8 +65,8 @@ struct App {
     state: Option<AppState>,
     error: Option<anyhow::Error>,
     proxy: EventLoopProxy<UserEvent>,
-    /// File given on the command line, opened once the window exists.
-    initial_file: Option<PathBuf>,
+    /// Command-line options, applied once the window exists.
+    options: Option<Options>,
 }
 
 impl App {
@@ -72,13 +83,9 @@ impl ApplicationHandler<UserEvent> for App {
         if self.state.is_some() {
             return;
         }
-        match AppState::new(event_loop, self.proxy.clone()) {
-            Ok(mut state) => {
-                if let Some(path) = self.initial_file.take() {
-                    state.start_loading(path);
-                }
-                self.state = Some(state);
-            }
+        let options = self.options.take().unwrap_or_default();
+        match AppState::new(event_loop, self.proxy.clone(), &options) {
+            Ok(state) => self.state = Some(state),
             Err(e) => self.handle(event_loop, Err(e)),
         }
     }
@@ -92,7 +99,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         let Some(state) = &mut self.state else { return };
         let result = match event {
-            UserEvent::MeshLoaded { path, result } => state.mesh_loaded(&path, *result),
+            UserEvent::MeshReady(result) => state.mesh_ready(*result),
         };
         self.handle(event_loop, result);
     }
@@ -120,26 +127,44 @@ struct AppState {
     camera: OrbitCamera,
     controller: CameraController,
     ui: UiState,
+    /// CPU copy of the reference mesh, for bounds now and spatial queries later.
     mesh: TriMesh,
     mesh_info: MeshInfo,
-    /// File currently being loaded on a background thread.
-    loading: Option<PathBuf>,
+    /// Description of the mesh being prepared on a background thread.
+    loading: Option<String>,
     /// Region of the window showing the 3D scene, in physical pixels.
     viewport: Viewport,
     next_repaint: Option<Instant>,
     last_frame: Option<Instant>,
     cpu_ms: f32,
     interval_ms: f32,
+    gpu_ms: Option<f32>,
+    /// Requested `--bench` duration; the benchmark starts once a mesh is shown.
+    bench_duration: Option<Duration>,
+    bench: Option<Bench>,
+    /// `--zoom` factor, applied when the first mesh is framed.
+    initial_zoom: Option<f32>,
 }
 
 impl AppState {
-    fn new(event_loop: &ActiveEventLoop, proxy: EventLoopProxy<UserEvent>) -> anyhow::Result<Self> {
+    fn new(
+        event_loop: &ActiveEventLoop,
+        proxy: EventLoopProxy<UserEvent>,
+        options: &Options,
+    ) -> anyhow::Result<Self> {
         let attributes = Window::default_attributes()
             .with_title("Polyflow")
             .with_inner_size(winit::dpi::LogicalSize::new(1440.0, 900.0));
         let window = Arc::new(event_loop.create_window(attributes)?);
         let size = window.inner_size();
-        let ui = UiState::default();
+        let mut ui = UiState {
+            vsync: options.vsync,
+            continuous: options.continuous,
+            ..Default::default()
+        };
+        if let Some(rings) = options.torus_rings {
+            ui.torus_rings = rings;
+        }
         let renderer = Renderer::new(window.as_ref(), size.width, size.height, ui.vsync)
             .context("failed to initialize Vulkan")?;
 
@@ -160,14 +185,8 @@ impl AppState {
             egui_state,
             camera: OrbitCamera::default(),
             controller: CameraController::default(),
-            ui,
             mesh: TriMesh::default(),
-            mesh_info: MeshInfo {
-                name: String::new(),
-                vertices: 0,
-                triangles: 0,
-                file: None,
-            },
+            mesh_info: MeshInfo::empty(),
             loading: None,
             viewport: Viewport {
                 width: size.width as f32,
@@ -178,8 +197,19 @@ impl AppState {
             last_frame: None,
             cpu_ms: 0.0,
             interval_ms: 0.0,
+            gpu_ms: None,
+            bench_duration: options.bench,
+            bench: None,
+            initial_zoom: options.zoom,
+            ui,
         };
-        state.generate_test_mesh()?;
+        let first_job = match &options.mesh {
+            Some(path) => Job::Open(path.clone()),
+            None => Job::Torus {
+                rings: state.ui.torus_rings,
+            },
+        };
+        state.start_job(first_job);
         Ok(state)
     }
 
@@ -204,7 +234,7 @@ impl AppState {
                 let actions = self.redraw()?;
                 self.apply_post_frame_actions(event_loop, &actions);
             }
-            WindowEvent::DroppedFile(path) => self.start_loading(path),
+            WindowEvent::DroppedFile(path) => self.start_job(Job::Open(path)),
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.controller.modifiers = modifiers.state()
             }
@@ -251,79 +281,62 @@ impl AppState {
         Ok(())
     }
 
-    /// Loads `path` on a background thread; the result arrives as a
-    /// [`UserEvent::MeshLoaded`].
-    fn start_loading(&mut self, path: PathBuf) {
+    /// Prepares a mesh on a background thread; the result arrives as a
+    /// [`UserEvent::MeshReady`].
+    fn start_job(&mut self, job: Job) {
+        self.window.request_redraw();
         if let Some(current) = &self.loading {
-            self.ui.error = Some(format!("Already loading {}", display_name(current)));
-            self.window.request_redraw();
+            self.ui.error = Some(format!("Still preparing {current}"));
             return;
         }
-        log::info!("Loading {}", path.display());
-        self.loading = Some(path.clone());
+        log::info!("Preparing {}", job.name());
+        self.loading = Some(job.name());
         let proxy = self.proxy.clone();
         let spawned = std::thread::Builder::new()
-            .name("mesh loader".into())
+            .name("mesh preparation".into())
             .spawn(move || {
-                let result = Box::new(polyflow_io::load_mesh(&path));
+                let result = Box::new(jobs::run(&job));
                 // Fails only if the event loop is gone, i.e. the app is closing.
-                let _ = proxy.send_event(UserEvent::MeshLoaded { path, result });
+                let _ = proxy.send_event(UserEvent::MeshReady(result));
             });
         if let Err(e) = spawned {
             self.loading = None;
-            self.ui.error = Some(format!("Could not start loading: {e}"));
+            self.ui.error = Some(format!("Could not start a background thread: {e}"));
         }
-        self.window.request_redraw();
     }
 
-    fn mesh_loaded(
-        &mut self,
-        path: &Path,
-        result: Result<LoadedMesh, LoadError>,
-    ) -> anyhow::Result<()> {
+    fn mesh_ready(&mut self, result: Result<Prepared, String>) -> anyhow::Result<()> {
         self.loading = None;
         self.window.request_redraw();
-        let loaded = match result {
-            Ok(loaded) => loaded,
-            Err(e) => {
-                log::error!("Failed to load {}: {e}", path.display());
-                self.ui.error = Some(format!("Could not open {}: {e}", display_name(path)));
+        let prepared = match result {
+            Ok(prepared) => prepared,
+            Err(message) => {
+                log::error!("{message}");
+                self.ui.error = Some(message);
                 return Ok(());
             }
         };
 
         let start = Instant::now();
-        self.renderer.set_mesh(&loaded.mesh)?;
-        let upload = start.elapsed();
-
-        let file = FileInfo {
-            bytes: loaded.file_bytes,
-            skipped_faces: loaded.skipped_faces,
-            read: loaded.read_time,
-            parse: loaded.parse_time,
-            normals: loaded.normals_time,
-            upload,
-        };
+        self.renderer.set_mesh(&prepared.gpu_data)?;
+        let mut info = prepared.info;
+        info.upload = start.elapsed();
         log::info!(
-            "Loaded {}: {} vertices, {} triangles (read {:?}, parse {:?}, normals {:?}, upload {:?})",
-            path.display(),
-            loaded.mesh.vertex_count(),
-            loaded.mesh.triangle_count(),
-            file.read,
-            file.parse,
-            file.normals,
-            file.upload,
+            "Showing {}: {} vertices, {} triangles, {} meshlets (meshlets built in {:?}, uploaded in {:?})",
+            info.name,
+            info.vertices,
+            info.triangles,
+            info.meshlets,
+            info.meshlet_build,
+            info.upload,
         );
-        self.mesh_info = MeshInfo {
-            name: display_name(path),
-            vertices: loaded.mesh.vertex_count(),
-            triangles: loaded.mesh.triangle_count(),
-            file: Some(file),
-        };
-        self.mesh = loaded.mesh;
+        self.window.set_title(&format!("{} — Polyflow", info.name));
+        self.mesh_info = info;
+        self.mesh = prepared.mesh;
         self.frame_mesh();
-        self.window
-            .set_title(&format!("{} — Polyflow", self.mesh_info.name));
+        if let Some(factor) = self.initial_zoom.take() {
+            self.camera.zoom(1.0 / factor);
+        }
         Ok(())
     }
 
@@ -335,29 +348,8 @@ impl AppState {
             .set_parent(self.window.as_ref())
             .pick_file();
         if let Some(path) = picked {
-            self.start_loading(path);
+            self.start_job(Job::Open(path));
         }
-    }
-
-    fn generate_test_mesh(&mut self) -> anyhow::Result<()> {
-        let start = Instant::now();
-        let mesh = primitives::torus(1.0, 0.35, self.ui.torus_rings, self.ui.torus_sides());
-        self.renderer.set_mesh(&mesh)?;
-        log::info!(
-            "Test mesh: {} triangles in {:?}",
-            mesh.triangle_count(),
-            start.elapsed()
-        );
-        self.mesh_info = MeshInfo {
-            name: "Test torus".into(),
-            vertices: mesh.vertex_count(),
-            triangles: mesh.triangle_count(),
-            file: None,
-        };
-        self.mesh = mesh;
-        self.frame_mesh();
-        self.window.set_title("Polyflow");
-        Ok(())
     }
 
     fn frame_mesh(&mut self) {
@@ -369,18 +361,33 @@ impl AppState {
     /// the app are returned to run after the frame is presented.
     fn redraw(&mut self) -> anyhow::Result<Actions> {
         let start = Instant::now();
+        let mut frame_interval_ms = None;
         if let Some(last) = self.last_frame.replace(start) {
-            smooth(&mut self.interval_ms, (start - last).as_secs_f32() * 1000.0);
+            let ms = (start - last).as_secs_f32() * 1000.0;
+            smooth(&mut self.interval_ms, ms);
+            frame_interval_ms = Some(ms);
+            if self.bench.is_some() {
+                // Turntable at a fixed angular speed, independent of frame rate.
+                self.camera.orbit(ms * 0.0005, 0.0);
+            }
+        }
+        let gpu_ms = self
+            .renderer
+            .gpu_frame_time()
+            .map(|d| d.as_secs_f32() * 1000.0);
+        if let Some(ms) = gpu_ms {
+            smooth(self.gpu_ms.get_or_insert(ms), ms);
         }
 
-        let loading_name = self.loading.as_deref().map(display_name);
         let stats = Stats {
             gpu: self.renderer.device_name(),
             present_mode: self.renderer.present_mode_name(),
             mesh: &self.mesh_info,
-            loading: loading_name.as_deref(),
+            loading: self.loading.as_deref(),
+            culling: self.renderer.cull_stats(),
             cpu_ms: self.cpu_ms,
             interval_ms: self.interval_ms,
+            gpu_ms: self.gpu_ms,
         };
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut actions = Actions::default();
@@ -404,21 +411,26 @@ impl AppState {
             height: viewport_rect.height().max(0.0) * ppp,
         };
         if actions.regenerate_mesh {
-            self.generate_test_mesh()?;
+            self.start_job(Job::Torus {
+                rings: self.ui.torus_rings,
+            });
         }
         if actions.frame_mesh {
             self.frame_mesh();
         }
         self.renderer.set_vsync(self.ui.vsync);
 
-        let aspect = self.viewport_aspect();
         let [r, g, b] = self.ui.mesh_color;
         self.renderer.render(FrameInput {
             viewport: self.viewport,
-            view_proj: self.camera.view_projection(aspect),
-            eye: self.camera.eye(),
+            view: MeshView {
+                view_proj: self.camera.view_projection(self.viewport_aspect()),
+                eye: self.camera.eye(),
+                color: Vec3::new(r, g, b),
+                backface_culling: self.ui.backface_culling,
+                show_meshlets: self.ui.show_meshlets,
+            },
             clear_color: BACKGROUND,
-            mesh_color: Vec3::new(r, g, b),
             ui: Some(UiFrame {
                 primitives: &primitives,
                 textures: output.textures_delta,
@@ -430,19 +442,45 @@ impl AppState {
             .viewport_output
             .get(&egui::ViewportId::ROOT)
             .map_or(Duration::MAX, |v| v.repaint_delay);
-        if self.ui.continuous
-            || repaint_delay.is_zero()
-            || actions.regenerate_mesh
-            || actions.frame_mesh
-        {
+        if self.ui.continuous || repaint_delay.is_zero() || actions.frame_mesh {
             self.window.request_redraw();
         } else {
             self.next_repaint = Instant::now().checked_add(repaint_delay);
             // Frame intervals are only meaningful while redrawing back to back.
             self.last_frame = None;
         }
-        smooth(&mut self.cpu_ms, start.elapsed().as_secs_f32() * 1000.0);
+        let cpu_ms = start.elapsed().as_secs_f32() * 1000.0;
+        smooth(&mut self.cpu_ms, cpu_ms);
+        self.record_bench(cpu_ms, gpu_ms, frame_interval_ms, &mut actions);
         Ok(actions)
+    }
+
+    fn record_bench(
+        &mut self,
+        cpu_ms: f32,
+        gpu_ms: Option<f32>,
+        frame_ms: Option<f32>,
+        actions: &mut Actions,
+    ) {
+        // Start timing once the first mesh is on screen.
+        if self.bench.is_none() && self.loading.is_none() && self.mesh_info.triangles > 0 {
+            self.bench = self.bench_duration.take().map(Bench::new);
+        }
+        let Some(bench) = &mut self.bench else { return };
+        if bench.record(cpu_ms, gpu_ms, frame_ms) {
+            let culling = self.renderer.cull_stats().unwrap_or_default();
+            println!(
+                "{} vertices, {} triangles, {} meshlets ({} visible in the last frame), {}x{} viewport\n{}",
+                self.mesh_info.vertices,
+                self.mesh_info.triangles,
+                self.mesh_info.meshlets,
+                culling.visible_meshlets,
+                self.viewport.width,
+                self.viewport.height,
+                bench.report()
+            );
+            actions.quit = true;
+        }
     }
 
     fn apply_post_frame_actions(&mut self, event_loop: &ActiveEventLoop, actions: &Actions) {
@@ -478,13 +516,6 @@ impl AppState {
         ctx.layer_id_at(egui::pos2(pos.x / ppp, pos.y / ppp))
             .is_some_and(|layer| layer.order != egui::Order::Background)
     }
-}
-
-fn display_name(path: &Path) -> String {
-    path.file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy()
-        .into_owned()
 }
 
 /// Exponential moving average, so displayed timings are readable.

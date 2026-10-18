@@ -28,6 +28,8 @@ pub struct GpuContext {
     pub properties: vk::PhysicalDeviceProperties,
     pub device: Device,
     pub queue_family: u32,
+    /// Valid bits in timestamps written on `queue`; 0 if unsupported.
+    pub timestamp_valid_bits: u32,
     pub queue: vk::Queue,
     pub allocator: ManuallyDrop<Arc<Mutex<Allocator>>>,
 }
@@ -121,7 +123,16 @@ impl GpuContext {
         let mut features13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
-        let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut features13);
+        let mut features12 = vk::PhysicalDeviceVulkan12Features::default()
+            .buffer_device_address(true)
+            .draw_indirect_count(true);
+        let core_features = vk::PhysicalDeviceFeatures::default()
+            .multi_draw_indirect(true)
+            .draw_indirect_first_instance(true);
+        let mut features = vk::PhysicalDeviceFeatures2::default()
+            .features(core_features)
+            .push_next(&mut features12)
+            .push_next(&mut features13);
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&device_extensions)
@@ -130,13 +141,18 @@ impl GpuContext {
         let device = unsafe { instance.create_device(physical_device, &device_info, None)? };
         // SAFETY: one queue was requested from this family.
         let queue = unsafe { device.get_device_queue(queue_family, 0) };
+        // SAFETY: plain query on an enumerated physical device.
+        let timestamp_valid_bits =
+            unsafe { instance.get_physical_device_queue_family_properties(physical_device) }
+                [queue_family as usize]
+                .timestamp_valid_bits;
 
         let allocator = Allocator::new(&AllocatorCreateDesc {
             instance: instance.clone(),
             device: device.clone(),
             physical_device,
             debug_settings: Default::default(),
-            buffer_device_address: false,
+            buffer_device_address: true,
             allocation_sizes: Default::default(),
         })?;
 
@@ -150,6 +166,7 @@ impl GpuContext {
             properties,
             device,
             queue_family,
+            timestamp_valid_bits,
             queue,
             allocator: ManuallyDrop::new(Arc::new(Mutex::new(allocator))),
         };
@@ -300,10 +317,23 @@ fn supports_required_features(instance: &Instance, pd: vk::PhysicalDevice) -> bo
         return false;
     }
     let mut features13 = vk::PhysicalDeviceVulkan13Features::default();
-    let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut features13);
+    let mut features12 = vk::PhysicalDeviceVulkan12Features::default();
+    let mut features = vk::PhysicalDeviceFeatures2::default()
+        .push_next(&mut features12)
+        .push_next(&mut features13);
     // SAFETY: as above.
     unsafe { instance.get_physical_device_features2(pd, &mut features) };
-    features13.dynamic_rendering == vk::TRUE && features13.synchronization2 == vk::TRUE
+    let core = features.features;
+    [
+        features13.dynamic_rendering,
+        features13.synchronization2,
+        features12.buffer_device_address,
+        features12.draw_indirect_count,
+        core.multi_draw_indirect,
+        core.draw_indirect_first_instance,
+    ]
+    .iter()
+    .all(|&f| f == vk::TRUE)
 }
 
 fn find_queue_family(

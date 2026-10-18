@@ -32,13 +32,26 @@ Shaders are written in [Slang](https://shader-slang.org/) under
 script, using `slangc` from the [Vulkan SDK](https://vulkan.lunarg.com/) (or
 `$SLANGC`). Precompiled SPIR-V is committed in `crates/render/shaders/spirv/`
 so the project builds without the SDK; when you change a shader with `slangc`
-available, the build refreshes that folder — commit it with your change.
+available, the build refreshes that folder â€” commit it with your change.
 
 ## Debugging the renderer
 
 Vulkan validation layers are enabled in debug builds when the Vulkan SDK is
 installed. Set `POLYFLOW_VALIDATION=0` or `1` to override, and
 `POLYFLOW_GPU=<name substring>` to pick a specific GPU.
+
+## Benchmarking
+
+The app has a reproducible benchmark mode: it spins the camera around the mesh
+with vsync off, then prints CPU, GPU and frame-interval statistics and exits.
+
+```sh
+cargo run --release -- --torus 7072 --bench 5            # 50M-triangle test torus
+cargo run --release -- sculpt.obj --bench 5 --zoom 4     # your mesh, zoomed in 4x
+```
+
+Include before/after numbers from it in pull requests that touch rendering.
+`POLYFLOW_GPU=<name>` selects the GPU, which is handy for testing integrated GPUs.
 
 ## Profiling
 

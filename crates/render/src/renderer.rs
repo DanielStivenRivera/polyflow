@@ -5,15 +5,15 @@ use std::sync::Arc;
 use ash::vk;
 use egui_ash_renderer::allocator::GpuAllocator;
 use egui_ash_renderer::{DynamicRendering, Options, RenderMode};
-use polyflow_core::glam::{Mat4, Vec3};
-use polyflow_core::mesh::TriMesh;
+use polyflow_core::glam::Vec3;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::RenderError;
 use crate::context::GpuContext;
 use crate::memory::{GpuImage, subresource_range};
-use crate::mesh::{GpuMesh, MeshPipeline, MeshPushConstants};
+use crate::mesh::{CullStats, GpuMesh, MeshData, MeshPipeline, MeshView};
 use crate::swapchain::Swapchain;
+use crate::timer::GpuTimer;
 
 /// Number of frames the CPU may record ahead of the GPU.
 pub const FRAMES_IN_FLIGHT: usize = 2;
@@ -23,12 +23,10 @@ pub const FRAMES_IN_FLIGHT: usize = 2;
 pub struct FrameInput<'a> {
     /// Region of the window the 3D scene is drawn into, in physical pixels.
     pub viewport: Viewport,
-    pub view_proj: Mat4,
-    pub eye: Vec3,
+    /// Camera and display settings for the reference mesh.
+    pub view: MeshView,
     /// Linear RGB.
     pub clear_color: Vec3,
-    /// Linear RGB.
-    pub mesh_color: Vec3,
     pub ui: Option<UiFrame<'a>>,
 }
 
@@ -88,6 +86,11 @@ pub struct Renderer {
     frame_index: usize,
     mesh_pipeline: MeshPipeline,
     mesh: Option<GpuMesh>,
+    timer: GpuTimer,
+    /// GPU time of the most recently completed frame.
+    gpu_time: Option<std::time::Duration>,
+    /// Culling results of the most recently completed frame.
+    cull_stats: Option<CullStats>,
     egui: Option<egui_ash_renderer::Renderer<GpuAllocator>>,
     window_extent: vk::Extent2D,
     vsync: bool,
@@ -155,6 +158,7 @@ impl Renderer {
         let depth_format = pick_depth_format(&ctx)?;
         let depth = create_depth(&ctx, swapchain.extent, depth_format)?;
         let mesh_pipeline = MeshPipeline::new(&ctx, swapchain.format, depth_format)?;
+        let timer = GpuTimer::new(&ctx)?;
         let egui = egui_ash_renderer::Renderer::with_gpu_allocator(
             Arc::clone(&ctx.allocator),
             ctx.device.clone(),
@@ -179,6 +183,9 @@ impl Renderer {
             frame_index: 0,
             mesh_pipeline,
             mesh: None,
+            timer,
+            gpu_time: None,
+            cull_stats: None,
             egui: Some(egui),
             window_extent,
             vsync,
@@ -189,6 +196,16 @@ impl Renderer {
 
     pub fn device_name(&self) -> &str {
         self.ctx.device_name()
+    }
+
+    /// Meshlet culling results of the most recently completed frame.
+    pub fn cull_stats(&self) -> Option<CullStats> {
+        self.cull_stats
+    }
+
+    /// GPU execution time of the most recently completed frame.
+    pub fn gpu_frame_time(&self) -> Option<std::time::Duration> {
+        self.gpu_time
     }
 
     pub fn max_texture_side(&self) -> usize {
@@ -223,7 +240,7 @@ impl Renderer {
     }
 
     /// Replaces the displayed mesh. Blocks until the upload has finished.
-    pub fn set_mesh(&mut self, mesh: &TriMesh) -> Result<(), RenderError> {
+    pub fn set_mesh(&mut self, mesh: &MeshData) -> Result<(), RenderError> {
         // SAFETY: waiting for idle so the old mesh is no longer in use.
         unsafe { self.ctx.device.device_wait_idle()? };
         if let Some(mut old) = self.mesh.take() {
@@ -252,6 +269,16 @@ impl Renderer {
         let frame = &mut self.frames[self.frame_index];
         // SAFETY: the fence belongs to this device.
         unsafe { device.wait_for_fences(&[frame.in_flight], true, u64::MAX)? };
+        if let Some(time) = self.timer.collect(&device, self.frame_index) {
+            self.gpu_time = Some(time);
+        }
+        if let Some(stats) = self
+            .mesh
+            .as_mut()
+            .and_then(|m| m.take_stats(self.frame_index))
+        {
+            self.cull_stats = Some(stats);
+        }
 
         let egui = self.egui.as_mut().expect("egui renderer lives until drop");
         for id in frame.textures_to_free.drain(..) {
@@ -342,6 +369,12 @@ impl Renderer {
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             )?;
+            self.timer.begin(device, cmd, self.frame_index);
+            let mesh_visible = input.viewport.clamped_rect(extent).is_some();
+            if let Some(mesh) = self.mesh.as_mut().filter(|_| mesh_visible) {
+                self.mesh_pipeline
+                    .record_cull(&self.ctx, cmd, mesh, self.frame_index, &input.view);
+            }
 
             let to_attachment = [
                 vk::ImageMemoryBarrier2::default()
@@ -416,12 +449,8 @@ impl Renderer {
                 };
                 device.cmd_set_viewport(cmd, 0, &[viewport]);
                 device.cmd_set_scissor(cmd, 0, &[rect]);
-                let push = MeshPushConstants {
-                    view_proj: input.view_proj,
-                    eye: input.eye.extend(1.0),
-                    color: input.mesh_color.extend(1.0),
-                };
-                self.mesh_pipeline.draw(device, cmd, mesh, &push);
+                self.mesh_pipeline
+                    .draw(device, cmd, mesh, self.frame_index, &input.view);
             }
 
             // The UI renderer sets its own viewport and scissors.
@@ -443,6 +472,7 @@ impl Renderer {
                 cmd,
                 &vk::DependencyInfo::default().image_memory_barriers(&to_present),
             );
+            self.timer.end(device, cmd, self.frame_index);
             device.end_command_buffer(cmd)?;
         }
         Ok(())
@@ -492,6 +522,7 @@ impl Drop for Renderer {
                 mesh.destroy(&self.ctx);
             }
             self.mesh_pipeline.destroy(&self.ctx);
+            self.timer.destroy(&self.ctx);
             self.depth.destroy(&self.ctx);
             self.swapchain.destroy(&self.ctx);
             for frame in &self.frames {

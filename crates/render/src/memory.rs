@@ -119,6 +119,26 @@ impl GpuBuffer {
         }
     }
 
+    /// An empty placeholder; [`GpuBuffer::destroy`] on it does nothing.
+    pub fn null() -> Self {
+        Self {
+            buffer: vk::Buffer::null(),
+            allocation: None,
+        }
+    }
+
+    /// GPU address of the buffer, which must have been created with
+    /// `SHADER_DEVICE_ADDRESS` usage.
+    pub fn device_address(&self, ctx: &GpuContext) -> vk::DeviceAddress {
+        let info = vk::BufferDeviceAddressInfo::default().buffer(self.buffer);
+        // SAFETY: live buffer created with device address usage.
+        unsafe { ctx.device.get_buffer_device_address(&info) }
+    }
+
+    pub fn mapped(&self) -> Option<&[u8]> {
+        self.allocation.as_ref().and_then(|a| a.mapped_slice())
+    }
+
     pub fn mapped_mut(&mut self) -> Option<&mut [u8]> {
         self.allocation.as_mut().and_then(|a| a.mapped_slice_mut())
     }

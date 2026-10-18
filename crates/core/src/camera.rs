@@ -4,7 +4,7 @@
 //! space (Y down, depth in `[0, 1]`) with reverse-Z and an infinite far plane,
 //! which gives near-uniform depth precision for huge scenes.
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 
 use crate::bounds::Aabb;
 
@@ -111,6 +111,26 @@ impl OrbitCamera {
     }
 }
 
+/// Frustum planes of a reverse-Z, infinite-far `view_proj` (as produced by
+/// [`OrbitCamera::view_projection`]): left, right, bottom, top, near.
+///
+/// Each plane is `(normal, d)` with a unit, inward-pointing normal, so a point
+/// `p` is inside when `normal.dot(p) + d >= 0` for every plane, and a sphere is
+/// outside when that value is below `-radius` for any plane. There is no far
+/// plane: it is at infinity.
+pub fn frustum_planes(view_proj: Mat4) -> [Vec4; 5] {
+    let r = |i| view_proj.row(i);
+    // Clip space: -w <= x, y <= w and, with reverse-Z, 0 <= z <= w.
+    [
+        r(3) + r(0),
+        r(3) - r(0),
+        r(3) + r(1),
+        r(3) - r(1),
+        r(3) - r(2),
+    ]
+    .map(|p| p / p.truncate().length())
+}
+
 #[cfg(test)]
 mod tests {
     use glam::Vec4Swizzles;
@@ -174,6 +194,28 @@ mod tests {
         let moved_px = (after - before).truncate() * height / 2.0;
         assert!((moved_px.x - 40.0).abs() < 1e-2, "{moved_px}");
         assert!((moved_px.y + 25.0).abs() < 1e-2, "{moved_px}");
+    }
+
+    #[test]
+    fn frustum_planes_classify_points() {
+        let cam = OrbitCamera {
+            yaw: 0.4,
+            pitch: 0.2,
+            ..Default::default()
+        };
+        let planes = frustum_planes(cam.view_projection(1.5));
+        let inside = |p: Vec3| planes.iter().all(|pl| pl.truncate().dot(p) + pl.w >= 0.0);
+        assert!(inside(cam.target));
+        assert!(inside(cam.target - cam.back() * 1e6), "no far plane");
+        assert!(!inside(cam.eye() + cam.back()), "behind the camera");
+        let right = Vec3::Y.cross(cam.back()).normalize();
+        assert!(
+            !inside(cam.target + right * cam.distance * 10.0),
+            "far to the side"
+        );
+        for plane in planes {
+            assert!((plane.truncate().length() - 1.0).abs() < 1e-5);
+        }
     }
 
     #[test]

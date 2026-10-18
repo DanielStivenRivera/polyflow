@@ -37,6 +37,7 @@ rayon = "1.12"
 fast-float2 = "0.2"
 memchr = "2"
 rfd = "0.17"
+meshopt = "0.7"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

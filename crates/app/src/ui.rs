@@ -8,8 +8,32 @@ pub struct MeshInfo {
     pub name: String,
     pub vertices: usize,
     pub triangles: usize,
-    /// Present for meshes loaded from a file.
-    pub file: Option<FileInfo>,
+    pub meshlets: usize,
+    pub source: MeshSource,
+    pub meshlet_build: Duration,
+    pub upload: Duration,
+}
+
+impl MeshInfo {
+    pub fn empty() -> Self {
+        Self {
+            name: "None".into(),
+            vertices: 0,
+            triangles: 0,
+            meshlets: 0,
+            source: MeshSource::Generated {
+                time: Duration::ZERO,
+            },
+            meshlet_build: Duration::ZERO,
+            upload: Duration::ZERO,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum MeshSource {
+    File(FileInfo),
+    Generated { time: Duration },
 }
 
 #[derive(Debug, Clone)]
@@ -19,7 +43,6 @@ pub struct FileInfo {
     pub read: Duration,
     pub parse: Duration,
     pub normals: Duration,
-    pub upload: Duration,
 }
 
 /// Read-only information shown in the panel.
@@ -28,13 +51,17 @@ pub struct Stats<'a> {
     pub gpu: &'a str,
     pub present_mode: &'a str,
     pub mesh: &'a MeshInfo,
-    /// Name of the file being loaded, if any.
+    /// Description of the mesh being prepared, if any.
     pub loading: Option<&'a str>,
+    /// Culling results of the last completed frame.
+    pub culling: Option<polyflow_render::CullStats>,
     /// Smoothed time spent on the CPU per frame, in milliseconds.
     pub cpu_ms: f32,
     /// Smoothed time between frames, in milliseconds; only meaningful when
     /// redrawing continuously.
     pub interval_ms: f32,
+    /// Smoothed GPU time per frame, in milliseconds, if measurable.
+    pub gpu_ms: Option<f32>,
 }
 
 /// Things the user asked for this frame.
@@ -54,6 +81,8 @@ pub struct UiState {
     pub mesh_color: [f32; 3],
     pub vsync: bool,
     pub continuous: bool,
+    pub backface_culling: bool,
+    pub show_meshlets: bool,
     /// Last error to show the user, until dismissed.
     pub error: Option<String>,
 }
@@ -65,16 +94,14 @@ impl Default for UiState {
             mesh_color: [0.48, 0.43, 0.39],
             vsync: true,
             continuous: false,
+            backface_culling: true,
+            show_meshlets: false,
             error: None,
         }
     }
 }
 
 impl UiState {
-    pub fn torus_sides(&self) -> u32 {
-        (self.torus_rings / 2).max(3)
-    }
-
     /// Draws the UI. Returns the requested actions and the rect left for the
     /// 3D viewport, in points.
     pub fn show(&mut self, ui: &mut egui::Ui, stats: &Stats<'_>) -> (Actions, egui::Rect) {
@@ -95,6 +122,11 @@ impl UiState {
                     if ui.add(egui::Button::new("Frame mesh").shortcut_text("F")).clicked() {
                         actions.frame_mesh = true;
                     }
+                    ui.checkbox(&mut self.backface_culling, "Backface culling").on_hover_text(
+                        "Skip back faces. Turn off to see inside open meshes (back faces are tinted).",
+                    );
+                    ui.checkbox(&mut self.show_meshlets, "Show meshlets");
+                    ui.separator();
                     ui.checkbox(&mut self.vsync, "VSync");
                     ui.checkbox(&mut self.continuous, "Redraw continuously")
                         .on_hover_text("Render every frame instead of only on changes, to measure performance.");
@@ -143,16 +175,25 @@ impl UiState {
             row(ui, "Name", &mesh.name);
             row(ui, "Vertices", &group_thousands(mesh.vertices));
             row(ui, "Triangles", &group_thousands(mesh.triangles));
-            if let Some(file) = &mesh.file {
-                row(ui, "File size", &format_bytes(file.bytes));
-                row(ui, "Read", &format_duration(file.read));
-                row(ui, "Parse", &format_duration(file.parse));
-                row(ui, "Normals", &format_duration(file.normals));
-                row(ui, "GPU upload", &format_duration(file.upload));
-                if file.skipped_faces > 0 {
-                    row(ui, "Skipped faces", &group_thousands(file.skipped_faces));
+            row(ui, "Meshlets", &group_thousands(mesh.meshlets));
+        });
+        ui.collapsing("Load times", |ui| {
+            egui::Grid::new("load_times").num_columns(2).show(ui, |ui| {
+                match &mesh.source {
+                    MeshSource::File(file) => {
+                        row(ui, "File size", &format_bytes(file.bytes));
+                        row(ui, "Read", &format_duration(file.read));
+                        row(ui, "Parse", &format_duration(file.parse));
+                        row(ui, "Normals", &format_duration(file.normals));
+                        if file.skipped_faces > 0 {
+                            row(ui, "Skipped faces", &group_thousands(file.skipped_faces));
+                        }
+                    }
+                    MeshSource::Generated { time } => row(ui, "Generate", &format_duration(*time)),
                 }
-            }
+                row(ui, "Meshlets", &format_duration(mesh.meshlet_build));
+                row(ui, "GPU upload", &format_duration(mesh.upload));
+            });
         });
         ui.horizontal(|ui| {
             if ui.button("Open…").clicked() {
@@ -170,11 +211,12 @@ impl UiState {
         ui.separator();
         ui.collapsing("Test mesh", |ui| {
             ui.add(
-                egui::Slider::new(&mut self.torus_rings, 16..=4096)
+                egui::Slider::new(&mut self.torus_rings, 16..=8192)
                     .logarithmic(true)
                     .text("Rings"),
             );
-            let pending = 2 * self.torus_rings as usize * self.torus_sides() as usize;
+            let pending =
+                2 * self.torus_rings as usize * crate::jobs::torus_sides(self.torus_rings) as usize;
             if ui
                 .button(format!("Generate {} triangles", group_thousands(pending)))
                 .clicked()
@@ -184,6 +226,14 @@ impl UiState {
         });
 
         ui.separator();
+        ui.strong("Viewport");
+        ui.checkbox(&mut self.backface_culling, "Backface culling")
+            .on_hover_text(
+                "Skip back faces. Turn off to see inside open meshes (back faces are tinted).",
+            );
+        ui.checkbox(&mut self.show_meshlets, "Show meshlets");
+
+        ui.separator();
         ui.collapsing("Performance", |ui| {
             egui::Grid::new("performance")
                 .num_columns(2)
@@ -191,6 +241,31 @@ impl UiState {
                     row(ui, "GPU", stats.gpu);
                     row(ui, "Present mode", stats.present_mode);
                     row(ui, "CPU frame", &format!("{:.2} ms", stats.cpu_ms));
+                    if let Some(gpu_ms) = stats.gpu_ms {
+                        row(ui, "GPU frame", &format!("{gpu_ms:.2} ms"));
+                    }
+                    if let Some(c) = stats.culling {
+                        let percent =
+                            |part: u32, whole: usize| 100.0 * part as f64 / whole.max(1) as f64;
+                        row(
+                            ui,
+                            "Visible meshlets",
+                            &format!(
+                                "{} ({:.0}%)",
+                                group_thousands(c.visible_meshlets as usize),
+                                percent(c.visible_meshlets, c.total_meshlets as usize)
+                            ),
+                        );
+                        row(
+                            ui,
+                            "Visible triangles",
+                            &format!(
+                                "{} ({:.0}%)",
+                                group_thousands(c.visible_triangles as usize),
+                                percent(c.visible_triangles, stats.mesh.triangles)
+                            ),
+                        );
+                    }
                     if self.continuous && stats.interval_ms > 0.0 {
                         row(
                             ui,

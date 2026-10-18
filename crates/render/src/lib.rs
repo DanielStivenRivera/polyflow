@@ -5,10 +5,12 @@
 
 mod context;
 mod memory;
-mod mesh;
+pub mod mesh;
 mod renderer;
 mod swapchain;
+mod timer;
 
+pub use mesh::{CullStats, MeshData, MeshView};
 pub use renderer::{FRAMES_IN_FLIGHT, FrameInput, Renderer, UiFrame, Viewport};
 
 /// Errors produced by the renderer.
@@ -25,7 +27,7 @@ pub enum RenderError {
     #[error("window handle error: {0}")]
     Window(String),
     #[error(
-        "no GPU with Vulkan 1.3, dynamic rendering and synchronization2 that can present to this window"
+        "no GPU that can present to this window supports Vulkan 1.3 with dynamic rendering, \n         synchronization2, buffer device address and indirect draw count"
     )]
     NoSuitableGpu,
     #[error("{0}")]
