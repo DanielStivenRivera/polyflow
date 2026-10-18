@@ -6,7 +6,7 @@ use ash::vk;
 use egui_ash_renderer::allocator::GpuAllocator;
 use egui_ash_renderer::{DynamicRendering, Options, RenderMode};
 use polyflow_core::glam::{Mat4, Vec3};
-use polyflow_core::primitives::TriMesh;
+use polyflow_core::mesh::TriMesh;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use crate::RenderError;

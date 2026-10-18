@@ -7,6 +7,9 @@ use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme};
 use crate::RenderError;
 use crate::context::GpuContext;
 
+/// Size of the staging buffer used for uploads.
+pub const STAGING_BYTES: usize = 64 << 20;
+
 /// A buffer and its memory. Must be destroyed explicitly with [`GpuBuffer::destroy`].
 #[derive(Debug)]
 pub struct GpuBuffer {
@@ -55,8 +58,9 @@ impl GpuBuffer {
         })
     }
 
-    /// Creates a device-local buffer filled with `data`, via a staging buffer.
-    /// Blocks until the copy has finished.
+    /// Creates a device-local buffer filled with `data`, via a staging buffer
+    /// of at most [`STAGING_BYTES`], so uploads of any size work even when
+    /// host-visible device memory is scarce. Blocks until the copy has finished.
     pub fn new_device_local(
         ctx: &GpuContext,
         command_pool: vk::CommandPool,
@@ -65,44 +69,54 @@ impl GpuBuffer {
         name: &str,
     ) -> Result<Self, RenderError> {
         let size = data.len() as vk::DeviceSize;
-        let mut staging = Self::new(
+        let mut dst = Self::new(
             ctx,
             size,
+            usage | vk::BufferUsageFlags::TRANSFER_DST,
+            MemoryLocation::GpuOnly,
+            name,
+        )?;
+        let staging_size = data.len().clamp(1, STAGING_BYTES);
+        let mut staging = match Self::new(
+            ctx,
+            staging_size as vk::DeviceSize,
             vk::BufferUsageFlags::TRANSFER_SRC,
             MemoryLocation::CpuToGpu,
             "staging",
-        )?;
-        let result = (|| {
-            staging.mapped_mut().ok_or(RenderError::Other(
-                "staging buffer is not host visible".into(),
-            ))?[..data.len()]
-                .copy_from_slice(data);
-            let dst = Self::new(
-                ctx,
-                size,
-                usage | vk::BufferUsageFlags::TRANSFER_DST,
-                MemoryLocation::GpuOnly,
-                name,
-            )?;
-            let copy = submit_and_wait(ctx, command_pool, |cmd| {
-                let region = vk::BufferCopy::default().size(size);
-                // SAFETY: both buffers are alive and large enough; `cmd` is recording.
-                unsafe {
-                    ctx.device
-                        .cmd_copy_buffer(cmd, staging.buffer, dst.buffer, &[region])
-                };
-            });
-            match copy {
-                Ok(()) => Ok(dst),
-                Err(e) => {
-                    let mut dst = dst;
-                    dst.destroy(ctx);
-                    Err(e)
-                }
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                dst.destroy(ctx);
+                return Err(e);
             }
+        };
+        let result = (|| {
+            for (i, piece) in data.chunks(staging_size).enumerate() {
+                staging.mapped_mut().ok_or(RenderError::Other(
+                    "staging buffer is not host visible".into(),
+                ))?[..piece.len()]
+                    .copy_from_slice(piece);
+                submit_and_wait(ctx, command_pool, |cmd| {
+                    let region = vk::BufferCopy::default()
+                        .dst_offset((i * staging_size) as vk::DeviceSize)
+                        .size(piece.len() as vk::DeviceSize);
+                    // SAFETY: both buffers are alive and large enough; `cmd` is recording.
+                    unsafe {
+                        ctx.device
+                            .cmd_copy_buffer(cmd, staging.buffer, dst.buffer, &[region])
+                    };
+                })?;
+            }
+            Ok(())
         })();
         staging.destroy(ctx);
-        result
+        match result {
+            Ok(()) => Ok(dst),
+            Err(e) => {
+                dst.destroy(ctx);
+                Err(e)
+            }
+        }
     }
 
     pub fn mapped_mut(&mut self) -> Option<&mut [u8]> {

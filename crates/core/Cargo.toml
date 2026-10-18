@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 glam.workspace = true
+rayon.workspace = true
 
 [lints]
 workspace = true

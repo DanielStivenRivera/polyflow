@@ -2,26 +2,7 @@
 
 use glam::Vec3;
 
-use crate::bounds::Aabb;
-
-/// An indexed triangle mesh with per-vertex normals.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct TriMesh {
-    pub positions: Vec<Vec3>,
-    pub normals: Vec<Vec3>,
-    /// Three indices per triangle, counter-clockwise when seen from outside.
-    pub indices: Vec<u32>,
-}
-
-impl TriMesh {
-    pub fn triangle_count(&self) -> usize {
-        self.indices.len() / 3
-    }
-
-    pub fn bounds(&self) -> Aabb {
-        Aabb::from_points(&self.positions)
-    }
-}
+use crate::mesh::TriMesh;
 
 /// A torus around the Y axis.
 ///

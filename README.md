@@ -30,6 +30,26 @@ You need a stable Rust toolchain (installed automatically from
 `rust-toolchain.toml` via rustup) and, once the renderer lands, the
 [Vulkan SDK](https://vulkan.lunarg.com/) for validation layers in debug builds.
 
+## Usage
+
+Open a reference mesh (`.obj` for now) with **File → Open** (Ctrl+O), by
+dropping it on the window, or from the command line:
+
+```sh
+polyflow path/to/sculpt.obj
+```
+
+Navigation follows Blender or Maya conventions: orbit with MMB or Alt+LMB, pan
+with Shift+MMB or Alt+MMB, zoom with the wheel, Ctrl+MMB or Alt+RMB, and press
+F to frame the mesh.
+
+The headless `polyflow-cli` loads meshes without a window, which is handy for
+pipelines and for benchmarking:
+
+```sh
+polyflow-cli info path/to/sculpt.obj
+```
+
 ## Documentation
 
 - [Design document](docs/DESIGN.md) — goals, decisions, performance budgets, roadmap

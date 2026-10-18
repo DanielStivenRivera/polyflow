@@ -30,6 +30,15 @@ impl Aabb {
         }
     }
 
+    /// Smallest box containing both boxes.
+    #[must_use]
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            min: self.min.min(other.min),
+            max: self.max.max(other.max),
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.min.cmpgt(self.max).any()
     }

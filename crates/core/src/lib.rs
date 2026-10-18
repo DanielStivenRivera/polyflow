@@ -8,6 +8,7 @@
 
 pub mod bounds;
 pub mod camera;
+pub mod mesh;
 pub mod primitives;
 
 pub use glam;

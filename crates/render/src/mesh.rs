@@ -5,7 +5,7 @@ use std::io::Cursor;
 use ash::vk;
 use bytemuck::{Pod, Zeroable};
 use polyflow_core::glam::{Mat4, Vec3, Vec4};
-use polyflow_core::primitives::TriMesh;
+use polyflow_core::mesh::TriMesh;
 
 use crate::RenderError;
 use crate::context::GpuContext;

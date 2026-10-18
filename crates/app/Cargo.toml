@@ -10,10 +10,12 @@ authors.workspace = true
 
 [dependencies]
 polyflow-core.workspace = true
+polyflow-io.workspace = true
 polyflow-render.workspace = true
 winit.workspace = true
 egui.workspace = true
 egui-winit.workspace = true
+rfd.workspace = true
 log.workspace = true
 env_logger.workspace = true
 anyhow.workspace = true

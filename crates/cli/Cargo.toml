@@ -11,7 +11,7 @@ authors.workspace = true
 [dependencies]
 polyflow-core.workspace = true
 polyflow-io.workspace = true
-polyflow-bake.workspace = true
+anyhow.workspace = true
 
 [lints]
 workspace = true
