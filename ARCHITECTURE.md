@@ -36,6 +36,20 @@ crates/
    cli ──────► io, bake ─┘
 ```
 
+## Editing model
+
+The retopo mesh is a `polyflow_core::halfedge::HalfEdgeMesh`: polygons with
+half-edge connectivity, stored in slot arrays so element ids stay stable across
+removals and undo. Topological operations (`add_face`, `remove_face`, ...)
+validate their input before changing anything and refuse anything that would
+make the mesh non-manifold.
+
+Edits run through `polyflow_core::history::MeshDocument::edit`. While an edit
+runs, the mesh journals the before/after value of every element it writes; a
+failed (or panicking) edit is rolled back from that journal, and a successful
+one becomes an undo step. Undo support therefore comes for free with any new
+operation, as long as it only writes through the mesh's journaled setters.
+
 ## Invariants
 
 - `core`, `spatial`, `io` and `bake` never touch the GPU or a window, and

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 57c87ca192ed8b0b0bffb9d7b053f4df9e20d17f59eaa76bd869542bf24521e1 # shrinks to ops = [Add { cell: 4, shape: 0, flip: false }, Add { cell: 0, shape: 0, flip: false }, Undo, Add { cell: 6, shape: 1, flip: false }, Add { cell: 1, shape: 1, flip: false }, Add { cell: 5, shape: 0, flip: false }, Add { cell: 0, shape: 1, flip: false }, Add { cell: 12, shape: 0, flip: false }, RemoveFace(0), RemoveVertex(6324912531338128095), Move(0, [0, 0, 0]), Add { cell: 0, shape: 0, flip: false }, RemoveVertex(1486080407495755734), Add { cell: 4, shape: 0, flip: false }, Add { cell: 4, shape: 0, flip: false }, Add { cell: 5, shape: 1, flip: true }]

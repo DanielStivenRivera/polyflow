@@ -1,0 +1,416 @@
+use glam::Vec3;
+use proptest::prelude::*;
+
+use super::*;
+use crate::history::MeshDocument;
+
+/// Small deterministic PRNG for shuffles.
+struct Rng(u64);
+impl Rng {
+    fn below(&mut self, n: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 % n as u64) as usize
+    }
+    fn shuffle<T>(&mut self, items: &mut [T]) {
+        for i in (1..items.len()).rev() {
+            items.swap(i, self.below(i + 1));
+        }
+    }
+}
+
+/// `(n + 1)^2` vertices on the XY plane and the counter-clockwise quad of each cell.
+fn grid(n: usize) -> (HalfEdgeMesh, Vec<[VertexId; 4]>) {
+    let mut mesh = HalfEdgeMesh::new();
+    let mut ids = Vec::new();
+    for j in 0..=n {
+        for i in 0..=n {
+            ids.push(mesh.add_vertex(Vec3::new(i as f32, j as f32, 0.0)));
+        }
+    }
+    let at = |i: usize, j: usize| ids[j * (n + 1) + i];
+    let mut cells = Vec::new();
+    for j in 0..n {
+        for i in 0..n {
+            cells.push([at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)]);
+        }
+    }
+    (mesh, cells)
+}
+
+fn add_all(mesh: &mut HalfEdgeMesh, faces: &[[VertexId; 4]]) {
+    for face in faces {
+        mesh.add_face(face)
+            .unwrap_or_else(|e| panic!("adding {face:?}: {e}"));
+        mesh.validate()
+            .unwrap_or_else(|e| panic!("after adding {face:?}: {e}"));
+    }
+}
+
+fn boundary_vertices(mesh: &HalfEdgeMesh) -> usize {
+    mesh.vertices()
+        .filter(|&v| mesh.is_boundary_vertex(v))
+        .count()
+}
+
+#[test]
+fn grid_in_any_order() {
+    let n = 6;
+    let mut rng = Rng(0x1234_5678_9abc_def1);
+    let (_, cells) = grid(n);
+    let mut orders = vec![cells.clone()];
+    orders.push(cells.iter().rev().copied().collect());
+    // Checkerboard: every second cell first, so the rest close holes whose
+    // corners already have several fans, which exercises patch relinking.
+    let (even, odd): (Vec<_>, Vec<_>) = cells
+        .iter()
+        .enumerate()
+        .partition(|(k, _)| (k % n + k / n) % 2 == 0);
+    orders.push(even.iter().chain(&odd).map(|(_, c)| **c).collect());
+    for _ in 0..20 {
+        let mut shuffled = cells.clone();
+        rng.shuffle(&mut shuffled);
+        orders.push(shuffled);
+    }
+    for order in orders {
+        let (mut mesh, _) = grid(n);
+        add_all(&mut mesh, &order);
+        assert_eq!(mesh.face_count(), n * n);
+        assert_eq!(mesh.edge_count(), 2 * n * (n + 1));
+        assert_eq!(boundary_vertices(&mesh), 4 * n);
+        assert_eq!(mesh.vertex_faces(VertexId(((n + 1) + 1) as u32)).count(), 4);
+    }
+}
+
+#[test]
+fn fan_closes_in_any_order() {
+    let mut rng = Rng(99);
+    for _ in 0..50 {
+        let mut mesh = HalfEdgeMesh::new();
+        let center = mesh.add_vertex(Vec3::ZERO);
+        let ring: Vec<VertexId> = (0..7)
+            .map(|k| {
+                let a = k as f32 / 7.0 * std::f32::consts::TAU;
+                mesh.add_vertex(Vec3::new(a.cos(), a.sin(), 0.0))
+            })
+            .collect();
+        let mut faces: Vec<usize> = (0..7).collect();
+        rng.shuffle(&mut faces);
+        for k in faces {
+            mesh.add_face(&[center, ring[k], ring[(k + 1) % 7]])
+                .unwrap();
+            mesh.validate().unwrap();
+        }
+        assert!(!mesh.is_boundary_vertex(center));
+        assert_eq!(mesh.vertex_neighbors(center).count(), 7);
+    }
+}
+
+#[test]
+fn closed_cube() {
+    let mut rng = Rng(7);
+    let corners = [
+        [0, 0, 0],
+        [1, 0, 0],
+        [1, 1, 0],
+        [0, 1, 0],
+        [0, 0, 1],
+        [1, 0, 1],
+        [1, 1, 1],
+        [0, 1, 1],
+    ];
+    // Outward-facing, counter-clockwise.
+    let quads = [
+        [0, 3, 2, 1],
+        [4, 5, 6, 7],
+        [0, 1, 5, 4],
+        [1, 2, 6, 5],
+        [2, 3, 7, 6],
+        [3, 0, 4, 7],
+    ];
+    for _ in 0..30 {
+        let mut mesh = HalfEdgeMesh::new();
+        let v: Vec<VertexId> = corners
+            .iter()
+            .map(|c| mesh.add_vertex(Vec3::from_array(c.map(|x| x as f32))))
+            .collect();
+        let mut order = quads;
+        rng.shuffle(&mut order);
+        add_all(&mut mesh, &order.map(|q| q.map(|i| v[i])));
+        assert_eq!(
+            mesh.halfedges()
+                .filter(|&h| mesh.is_boundary_halfedge(h))
+                .count(),
+            0
+        );
+        let euler =
+            mesh.vertex_count() as i64 - mesh.edge_count() as i64 + mesh.face_count() as i64;
+        assert_eq!(euler, 2);
+    }
+}
+
+#[test]
+fn faces_touching_at_a_vertex() {
+    let mut mesh = HalfEdgeMesh::new();
+    let c = mesh.add_vertex(Vec3::ZERO);
+    let p = [(1.0, 0.0), (1.0, 1.0), (-1.0, 0.0), (-1.0, -1.0)]
+        .map(|(x, y)| mesh.add_vertex(Vec3::new(x, y, 0.0)));
+    mesh.add_face(&[c, p[0], p[1]]).unwrap();
+    mesh.add_face(&[c, p[2], p[3]]).unwrap();
+    mesh.validate().unwrap();
+    assert_eq!(mesh.vertex_neighbors(c).count(), 4);
+    // Bridging the two fans makes the vertex a single fan again.
+    mesh.add_face(&[c, p[1], p[2]]).unwrap();
+    mesh.validate().unwrap();
+}
+
+#[test]
+fn invalid_faces_are_refused_without_changes() {
+    let (mut mesh, cells) = grid(2);
+    add_all(&mut mesh, &cells);
+    let before = mesh.clone();
+    let [a, b, c, d] = cells[0];
+    let interior = VertexId(4); // Center of the 2x2 grid.
+    let far = mesh.add_vertex(Vec3::new(5.0, 5.0, 0.0));
+    let snapshot = mesh.clone();
+    let cases: [(&[VertexId], TopologyError); 6] = [
+        (&[a, b], TopologyError::TooFewVertices),
+        (&[a, b, a], TopologyError::RepeatedVertex),
+        (
+            &[a, b, VertexId(999)],
+            TopologyError::MissingVertex(VertexId(999)),
+        ),
+        (&[a, b, far], TopologyError::EdgeTaken(a, b)),
+        (&[interior, far, d], TopologyError::InteriorVertex(interior)),
+        (&[d, c, b, a], TopologyError::EdgeTaken(d, c)),
+    ];
+    for (face, expected) in cases {
+        assert_eq!(mesh.add_face(face), Err(expected));
+        assert_eq!(mesh, snapshot);
+    }
+    let _ = before;
+}
+
+#[test]
+fn remove_and_restore_faces() {
+    let (mut mesh, cells) = grid(3);
+    add_all(&mut mesh, &cells);
+    let full = mesh.clone();
+    let center = mesh.faces().nth(4).unwrap();
+    let center_vertices: Vec<VertexId> = mesh.face_vertices(center).collect();
+    mesh.remove_face(center, false).unwrap();
+    mesh.validate().unwrap();
+    assert_eq!(mesh.face_count(), 8);
+    assert_eq!(mesh.edge_count(), full.edge_count(), "edges of a hole stay");
+    assert_eq!(boundary_vertices(&mesh), 12 + 4);
+    mesh.add_face(&center_vertices).unwrap();
+    mesh.validate().unwrap();
+    assert_eq!(mesh.face_count(), 9);
+
+    // Removing every face (keeping vertices) leaves no edges behind.
+    let faces: Vec<FaceId> = mesh.faces().collect();
+    for f in faces {
+        mesh.remove_face(f, false).unwrap();
+        mesh.validate().unwrap();
+    }
+    assert_eq!(
+        (mesh.face_count(), mesh.edge_count(), mesh.vertex_count()),
+        (0, 0, 16)
+    );
+}
+
+#[test]
+fn remove_vertices() {
+    let (mut mesh, cells) = grid(3);
+    add_all(&mut mesh, &cells);
+    mesh.remove_vertex(VertexId(5)).unwrap(); // Interior: removes 4 faces.
+    mesh.validate().unwrap();
+    assert_eq!(mesh.face_count(), 5);
+    mesh.remove_vertex(VertexId(3)).unwrap(); // Far corner: removes 1 face.
+    mesh.validate().unwrap();
+    assert_eq!(mesh.face_count(), 4);
+    assert_eq!(
+        mesh.remove_vertex(VertexId(3)),
+        Err(TopologyError::MissingVertex(VertexId(3)))
+    );
+}
+
+#[test]
+fn triangulation() {
+    let (mut mesh, cells) = grid(3);
+    add_all(&mut mesh, &cells);
+    let tris = mesh.triangulate();
+    assert_eq!(tris.len(), 9 * 2 * 3);
+    let positions: Vec<Option<Vec3>> = mesh.vertex_slots().collect();
+    for t in tris.as_chunks::<3>().0 {
+        let [a, b, c] = t.map(|i| positions[i as usize].unwrap());
+        assert!((b - a).cross(c - a).z > 0.0, "counter-clockwise from +Z");
+    }
+}
+
+// ---- Property tests --------------------------------------------------------
+
+const N: usize = 4;
+
+#[derive(Debug, Clone)]
+enum Op {
+    Add { cell: usize, shape: u8, flip: bool },
+    RemoveFace(usize),
+    RemoveVertex(usize),
+    Move(usize, [i8; 3]),
+    Undo,
+    Redo,
+}
+
+fn op() -> impl Strategy<Value = Op> {
+    prop_oneof![
+        6 => (0..N * N, 0u8..3, prop::bool::weighted(0.1)).prop_map(|(cell, shape, flip)| Op::Add { cell, shape, flip }),
+        1 => any::<usize>().prop_map(Op::RemoveFace),
+        1 => any::<usize>().prop_map(Op::RemoveVertex),
+        1 => (any::<usize>(), any::<[i8; 3]>()).prop_map(|(v, d)| Op::Move(v, d)),
+        2 => Just(Op::Undo),
+        1 => Just(Op::Redo),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 300, ..ProptestConfig::default() })]
+
+    #[test]
+    fn random_edits_keep_invariants_and_undo_exactly(ops in prop::collection::vec(op(), 1..80)) {
+        let (mesh, cells) = grid(N);
+        let initial = mesh.clone();
+        let mut doc = MeshDocument::new(mesh);
+        for op in ops {
+            let before = doc.mesh().clone();
+            let steps = doc.undo_steps();
+            let result = match op {
+                Op::Add { cell, shape, flip } => {
+                    let [a, b, c, d] = cells[cell];
+                    let mut face = match shape {
+                        0 => vec![a, b, c, d],
+                        1 => vec![a, b, c],
+                        _ => vec![a, c, d],
+                    };
+                    if flip {
+                        face.reverse();
+                    }
+                    doc.edit("Add face", |m| m.add_face(&face).map(|_| ()))
+                }
+                Op::RemoveFace(k) => {
+                    let face = doc.mesh().faces().nth(k % doc.mesh().face_count().max(1));
+                    match face {
+                        Some(f) => doc.edit("Remove face", |m| m.remove_face(f, true)),
+                        None => Ok(()),
+                    }
+                }
+                Op::RemoveVertex(k) => {
+                    let vertex = doc.mesh().vertices().nth(k % doc.mesh().vertex_count().max(1));
+                    match vertex {
+                        Some(v) => doc.edit("Remove vertex", |m| m.remove_vertex(v)),
+                        None => Ok(()),
+                    }
+                }
+                Op::Move(k, d) => {
+                    let vertex = doc.mesh().vertices().nth(k % doc.mesh().vertex_count().max(1));
+                    if let Some(v) = vertex {
+                        let p = doc.mesh().position(v) + Vec3::new(d[0] as f32, d[1] as f32, d[2] as f32) * 0.01;
+                        doc.edit("Move", |m| { m.set_position(v, p); Ok::<_, TopologyError>(()) }).unwrap();
+                    }
+                    Ok(())
+                }
+                Op::Undo => { doc.undo(); Ok(()) }
+                Op::Redo => { doc.redo(); Ok(()) }
+            };
+            prop_assert!(doc.mesh().validate().is_ok(), "{:?}", doc.mesh().validate());
+            match (&op, result) {
+                (Op::Undo | Op::Redo, _) => {}
+                (_, Err(_)) => prop_assert_eq!(doc.mesh(), &before, "failed edit changed the mesh"),
+                (_, Ok(())) if doc.undo_steps() > steps => {
+                    let after = doc.mesh().clone();
+                    doc.undo();
+                    prop_assert_eq!(doc.mesh(), &before, "undo did not restore the previous state");
+                    doc.redo();
+                    prop_assert_eq!(doc.mesh(), &after, "redo did not restore the edit");
+                }
+                (_, Ok(())) => prop_assert_eq!(doc.mesh(), &before, "edit without an undo step changed the mesh"),
+            }
+        }
+        while doc.undo().is_some() {}
+        prop_assert_eq!(doc.mesh(), &initial);
+    }
+}
+
+/// Found by the property test: a face that closes one fan of a vertex into a
+/// disk must be refused while other fans touch that vertex.
+#[test]
+fn closing_a_fan_shared_with_other_fans_is_refused() {
+    let build = |extra_fans: bool| {
+        let mut mesh = HalfEdgeMesh::new();
+        let p = |m: &mut HalfEdgeMesh, x: f32, y: f32| m.add_vertex(Vec3::new(x, y, 0.0));
+        let c = p(&mut mesh, 0.0, 0.0);
+        let (x, y, z) = (
+            p(&mut mesh, 1.0, 0.0),
+            p(&mut mesh, 1.0, 1.0),
+            p(&mut mesh, 0.0, 1.0),
+        );
+        mesh.add_face(&[c, x, y, z]).unwrap();
+        if extra_fans {
+            let (a, b) = (p(&mut mesh, -1.0, 0.5), p(&mut mesh, -1.0, -0.5));
+            mesh.add_face(&[c, a, b]).unwrap();
+            let (d, e) = (p(&mut mesh, 0.5, -1.0), p(&mut mesh, -0.5, -1.0));
+            mesh.add_face(&[c, d, e]).unwrap();
+        }
+        mesh.validate().unwrap();
+        (mesh, [c, x, y, z])
+    };
+    // Alone, the quad's fan may be closed (topologically valid, if folded).
+    // The triangle reuses both quad edges at `c`, reversed: x -> c and c -> z.
+    let (mut mesh, [c, x, _, z]) = build(false);
+    mesh.add_face(&[x, c, z]).unwrap();
+    mesh.validate().unwrap();
+
+    let (mut mesh, [c, x, _, z]) = build(true);
+    let before = mesh.clone();
+    assert_eq!(
+        mesh.add_face(&[x, c, z]),
+        Err(TopologyError::PatchRelinkFailed)
+    );
+    assert_eq!(mesh, before);
+}
+
+/// Timing for a large retopology mesh; run with
+/// `cargo test --release -p polyflow-core large_mesh_timing -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn large_mesh_timing() {
+    use std::time::Instant;
+    let n = 300;
+    let (mesh, cells) = grid(n);
+    let mut doc = MeshDocument::new(mesh);
+    doc.set_max_steps(usize::MAX);
+    let start = Instant::now();
+    for cell in &cells {
+        doc.edit("Add face", |m| m.add_face(cell)).unwrap();
+    }
+    let add = start.elapsed();
+    let start = Instant::now();
+    while doc.undo().is_some() {}
+    let undo = start.elapsed();
+    let start = Instant::now();
+    while doc.redo().is_some() {}
+    let redo = start.elapsed();
+    let start = Instant::now();
+    doc.mesh().validate().unwrap();
+    let validate = start.elapsed();
+    let faces = cells.len() as f64;
+    println!(
+        "{} quads: add {:.2} us/face, undo {:.2} us/step, redo {:.2} us/step, validate {:?}",
+        cells.len(),
+        add.as_secs_f64() / faces * 1e6,
+        undo.as_secs_f64() / faces * 1e6,
+        redo.as_secs_f64() / faces * 1e6,
+        validate
+    );
+}
