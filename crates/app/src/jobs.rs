@@ -30,6 +30,8 @@ impl Job {
 /// A mesh ready to upload. `info.upload` is filled in after uploading.
 #[derive(Debug)]
 pub struct Prepared {
+    /// The file the mesh came from (`None` for generated meshes).
+    pub source_path: Option<PathBuf>,
     pub mesh: TriMesh,
     pub gpu_data: MeshData,
     pub bvh: Bvh,
@@ -88,7 +90,12 @@ pub fn run(job: &Job) -> Result<Prepared, String> {
         bvh_bytes: bvh.memory_bytes(),
         upload: Duration::ZERO,
     };
+    let source_path = match job {
+        Job::Open(path) => Some(path.clone()),
+        Job::Torus { .. } => None,
+    };
     Ok(Prepared {
+        source_path,
         mesh,
         gpu_data,
         bvh,

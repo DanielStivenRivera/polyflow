@@ -52,6 +52,8 @@ cargo run --release -- sculpt.obj --bench 5 --zoom 4     # your mesh, zoomed in 
 
 Include before/after numbers from it in pull requests that touch rendering.
 `POLYFLOW_GPU=<name>` selects the GPU, which is handy for testing integrated GPUs.
+`POLYFLOW_AUTOSAVE_SECS=<n>` shortens the autosave interval (2 minutes by
+default) to test crash recovery.
 
 ## Profiling
 

@@ -99,9 +99,12 @@ pub struct Actions {
     pub redo: bool,
     pub relax_all: bool,
     pub clear_retopo: bool,
+    pub new_project: bool,
+    pub open_project: bool,
+    pub save_project: bool,
+    pub save_project_as: bool,
     pub import_retopo: bool,
-    pub save_retopo: bool,
-    pub save_retopo_as: bool,
+    pub export_retopo: bool,
 }
 
 /// Retopology state the UI shows and edits.
@@ -169,19 +172,20 @@ impl UiState {
         egui::Panel::top("menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.add(egui::Button::new("Open reference mesh…").shortcut_text("Ctrl+O")).clicked() {
-                        actions.open_file = true;
-                    }
+                    let item = |ui: &mut egui::Ui, label: &str, shortcut: &str, flag: &mut bool| {
+                        if ui.add(egui::Button::new(label).shortcut_text(shortcut)).clicked() {
+                            *flag = true;
+                        }
+                    };
+                    item(ui, "New project", "Ctrl+N", &mut actions.new_project);
+                    item(ui, "Open project…", "Ctrl+O", &mut actions.open_project);
+                    item(ui, "Save project", "Ctrl+S", &mut actions.save_project);
+                    item(ui, "Save project as…", "Ctrl+Shift+S", &mut actions.save_project_as);
                     ui.separator();
-                    if ui.add(egui::Button::new("Import retopology…").shortcut_text("Ctrl+I")).clicked() {
-                        actions.import_retopo = true;
-                    }
-                    if ui.add(egui::Button::new("Save retopology").shortcut_text("Ctrl+S")).clicked() {
-                        actions.save_retopo = true;
-                    }
-                    if ui.add(egui::Button::new("Save retopology as…").shortcut_text("Ctrl+Shift+S")).clicked() {
-                        actions.save_retopo_as = true;
-                    }
+                    item(ui, "Load reference mesh…", "Ctrl+L", &mut actions.open_file);
+                    ui.separator();
+                    item(ui, "Import retopology OBJ…", "Ctrl+I", &mut actions.import_retopo);
+                    item(ui, "Export retopology OBJ…", "Ctrl+E", &mut actions.export_retopo);
                     ui.separator();
                     if ui.button("Quit").clicked() {
                         actions.quit = true;
@@ -426,9 +430,10 @@ impl UiState {
                         ("Pan", "Shift+MMB · Alt+MMB"),
                         ("Zoom", "Wheel · Ctrl+MMB · Alt+RMB"),
                         ("Frame", "F"),
-                        ("Open", "Ctrl+O · drop a file"),
+                        ("Open project", "Ctrl+O · drop a .pflow"),
+                        ("Load sculpt", "Ctrl+L · drop an .obj"),
                         ("Undo / redo", "Ctrl+Z · Ctrl+Y"),
-                        ("Save retopo", "Ctrl+S"),
+                        ("Save project", "Ctrl+S"),
                         ("Tools", "Q create · D draw · R relax"),
                         ("Symmetry X", "X"),
                         ("Cancel", "Esc · right click"),

@@ -4,6 +4,28 @@ All notable changes to Polyflow are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-10-19
+
+### Added
+
+- Project files (`.pflow`): the retopology, the sculpt's location (relative
+  to the project and absolute, so moving a folder keeps working), the camera
+  and the retopology and tool settings, in one file. File > New, Open, Save
+  and Save as. If the sculpt has moved, Polyflow asks you to locate it.
+- Autosave every 2 minutes while there are unsaved changes, and an offer to
+  recover that work after Polyflow closes unexpectedly.
+- Projects open by dropping them on the window or from the command line.
+
+### Changed
+
+- Shortcuts: Ctrl+O opens a project and Ctrl+S saves it; the reference mesh
+  loads with Ctrl+L; retopology OBJ import and export are Ctrl+I and Ctrl+E.
+
+### Fixed
+
+- Windows: no console window opens next to the app (release builds). Logs and
+  `--bench` output still appear when started from a terminal.
+
 ## [0.1.0] - 2026-10-18
 
 First public preview: load a sculpt, retopologize it by hand, save the result.
@@ -33,6 +55,7 @@ First public preview: load a sculpt, retopologize it by hand, save the result.
 - Reference meshes: OBJ only (no PLY, FBX, glTF or USD yet).
 - No baking yet (planned for v0.2).
 - Missing retopology tools: selection, edge loops, bridge, extrude.
-- No native project format: save the retopology as OBJ.
+- No native project format: save the retopology as OBJ (added in 0.1.1).
 
+[0.1.1]: https://github.com/DanielStivenRivera/polyflow/releases/tag/v0.1.1
 [0.1.0]: https://github.com/DanielStivenRivera/polyflow/releases/tag/v0.1.0

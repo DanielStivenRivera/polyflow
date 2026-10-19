@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod obj;
+pub mod project;
 pub mod retopo;
 
 use std::path::Path;

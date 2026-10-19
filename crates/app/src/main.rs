@@ -1,9 +1,14 @@
 //! Polyflow desktop application.
 
+// Release builds are GUI applications on Windows: no console window opens
+// next to the app. Debug builds keep the console for logs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod bench;
 mod camera_control;
 mod jobs;
 mod options;
+mod project;
 mod retopo;
 mod ui;
 
@@ -27,6 +32,7 @@ use crate::bench::Bench;
 use crate::camera_control::CameraController;
 use crate::jobs::{Job, Prepared};
 use crate::options::Options;
+use crate::project::Autosave;
 use crate::retopo::Retopo;
 use crate::retopo::surface::Surface;
 use crate::retopo::symmetry::Axis;
@@ -65,6 +71,7 @@ enum UserEvent {
 }
 
 fn main() -> anyhow::Result<()> {
+    attach_parent_console();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let options = match options::parse(std::env::args_os().skip(1)) {
         options::ParseResult::Run(options) => options,
@@ -112,7 +119,19 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let options = self.options.take().unwrap_or_default();
         match AppState::new(event_loop, self.proxy.clone(), &options) {
-            Ok(state) => self.state = Some(state),
+            Ok(mut state) => {
+                let recovered = state.autosave.enabled && state.offer_recovery();
+                if !recovered {
+                    match options.mesh {
+                        Some(path) if is_project(&path) => state.open_project(&path, false),
+                        Some(path) => state.start_job(Job::Open(path)),
+                        None => state.start_job(Job::Torus {
+                            rings: state.ui.torus_rings,
+                        }),
+                    }
+                }
+                self.state = Some(state);
+            }
             Err(e) => self.handle(event_loop, Err(e)),
         }
     }
@@ -135,17 +154,25 @@ impl ApplicationHandler<UserEvent> for App {
         // Tear down the renderer and window while the display connection is
         // still open: after `run_app` returns it is gone (on Wayland,
         // destroying the Vulkan surface then crashes the driver).
+        if let Some(state) = &mut self.state {
+            // A clean exit: the user saved or chose to discard.
+            state.remove_autosave();
+        }
         self.state = None;
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let Some(state) = &mut self.state else { return };
-        match state.next_repaint {
+        let autosave_at = state.autosave_if_due();
+        let repaint_at = match state.next_repaint {
             Some(at) if at <= Instant::now() => {
                 state.next_repaint = None;
                 state.window.request_redraw();
-                event_loop.set_control_flow(ControlFlow::Wait);
+                None
             }
+            other => other,
+        };
+        match repaint_at.into_iter().chain(autosave_at).min() {
             Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
             None => event_loop.set_control_flow(ControlFlow::Wait),
         }
@@ -185,10 +212,17 @@ struct AppState {
     tools: Tools,
     /// Hover highlights and tool previews, rebuilt every frame.
     tool_overlay: Overlay,
-    /// File the retopology was last saved to or imported from.
-    retopo_path: Option<PathBuf>,
-    /// Mesh version at the last save, to detect unsaved changes.
+    /// The open project file, if it was saved or opened.
+    project_path: Option<PathBuf>,
+    /// The reference mesh file (`None` for the generated test mesh).
+    reference_path: Option<PathBuf>,
+    /// Retopo mesh version and reference at the last save, to detect
+    /// unsaved changes.
     saved_version: u64,
+    saved_reference: Option<PathBuf>,
+    /// Camera to restore once the project's reference mesh has loaded.
+    pending_camera: Option<polyflow_io::project::CameraState>,
+    autosave: Autosave,
     /// Title currently shown, to avoid resetting it every frame.
     title: String,
 }
@@ -225,7 +259,7 @@ impl AppState {
             Some(renderer.max_texture_side()),
         );
 
-        let mut state = Self {
+        let state = Self {
             renderer,
             window,
             proxy,
@@ -253,18 +287,15 @@ impl AppState {
             retopo: Retopo::default(),
             tools: Tools::default(),
             tool_overlay: Overlay::default(),
-            retopo_path: None,
+            project_path: None,
+            reference_path: None,
             saved_version: 0,
+            saved_reference: None,
+            pending_camera: None,
+            autosave: Autosave::new(options.bench.is_none()),
             title: String::new(),
             ui,
         };
-        let first_job = match &options.mesh {
-            Some(path) => Job::Open(path.clone()),
-            None => Job::Torus {
-                rings: state.ui.torus_rings,
-            },
-        };
-        state.start_job(first_job);
         Ok(state)
     }
 
@@ -293,6 +324,13 @@ impl AppState {
                 let actions = self.redraw()?;
                 self.apply_post_frame_actions(event_loop, &actions);
                 self.update_title();
+            }
+            WindowEvent::DroppedFile(path) if is_project(&path) => {
+                if !self.has_unsaved_changes()
+                    || self.confirm_discard("Opening a project replaces the current work.")
+                {
+                    self.open_project(&path, false);
+                }
             }
             WindowEvent::DroppedFile(path) => self.start_job(Job::Open(path)),
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -388,13 +426,13 @@ impl AppState {
             Some("z") if ctrl && mods.shift_key() => self.redo(),
             Some("z") if ctrl => self.undo(),
             Some("y") if ctrl => self.redo(),
-            Some("o") if ctrl => self.open_file_dialog(),
+            Some("n") if ctrl => self.new_project(),
+            Some("o") if ctrl => self.open_project_dialog(),
+            Some("l") if ctrl => self.open_file_dialog(),
             Some("i") if ctrl => self.import_retopo(),
-            Some("s") if ctrl && mods.shift_key() => {
-                self.save_retopo(true);
-            }
+            Some("e") if ctrl => self.export_retopo(),
             Some("s") if ctrl => {
-                self.save_retopo(false);
+                self.save_project(mods.shift_key());
             }
             Some("f") if !ctrl => self.frame_mesh(),
             Some("q") if !ctrl => self.tools.select(ToolKind::Create),
@@ -425,116 +463,6 @@ impl AppState {
         self.tools.status = None;
         let input = tool_input!(self);
         self.tools.update_hover(&self.retopo, &input);
-    }
-
-    fn retopo_dirty(&self) -> bool {
-        self.retopo.mesh().version() != self.saved_version
-    }
-
-    /// Saves the retopology, asking for a file if there is none yet or
-    /// `ask` is set. Returns whether it was saved.
-    fn save_retopo(&mut self, ask: bool) -> bool {
-        let path = match (&self.retopo_path, ask) {
-            (Some(path), false) => path.clone(),
-            _ => {
-                let picked = rfd::FileDialog::new()
-                    .set_title("Save retopology")
-                    .add_filter("OBJ", &["obj"])
-                    .set_file_name("retopo.obj")
-                    .set_parent(self.window.as_ref())
-                    .save_file();
-                match picked {
-                    Some(path) => path,
-                    None => return false,
-                }
-            }
-        };
-        match polyflow_io::retopo::save(&path, self.retopo.mesh()) {
-            Ok(()) => {
-                self.saved_version = self.retopo.mesh().version();
-                self.tools.status = Some(format!("Saved {}", jobs::display_name(&path)));
-                log::info!("Saved retopology to {}", path.display());
-                self.retopo_path = Some(path);
-                true
-            }
-            Err(e) => {
-                self.ui.error = Some(format!("Could not save {}: {e}", path.display()));
-                false
-            }
-        }
-    }
-
-    fn import_retopo(&mut self) {
-        if self.retopo_dirty()
-            && !self.confirm_discard("Importing replaces the current retopology.")
-        {
-            return;
-        }
-        let picked = rfd::FileDialog::new()
-            .set_title("Import retopology")
-            .add_filter("OBJ", &["obj"])
-            .set_parent(self.window.as_ref())
-            .pick_file();
-        let Some(path) = picked else { return };
-        match polyflow_io::retopo::load(&path) {
-            Ok(imported) => {
-                let faces = imported.mesh.face_count();
-                self.retopo.replace_mesh(imported.mesh);
-                self.tools.reset();
-                self.saved_version = self.retopo.mesh().version();
-                self.tools.status = Some(match imported.skipped_faces {
-                    0 => format!("Imported {faces} faces"),
-                    skipped => format!("Imported {faces} faces; skipped {skipped} invalid ones"),
-                });
-                self.retopo_path = Some(path);
-            }
-            Err(e) => self.ui.error = Some(format!("Could not import {}: {e}", path.display())),
-        }
-    }
-
-    /// Asks before throwing away unsaved retopology. True to go ahead.
-    fn confirm_discard(&mut self, what: &str) -> bool {
-        let answer = rfd::MessageDialog::new()
-            .set_level(rfd::MessageLevel::Warning)
-            .set_title("Unsaved retopology")
-            .set_description(format!("{what} Save your changes first?"))
-            .set_buttons(rfd::MessageButtons::YesNoCancel)
-            .set_parent(self.window.as_ref())
-            .show();
-        match answer {
-            rfd::MessageDialogResult::Yes => self.save_retopo(false),
-            rfd::MessageDialogResult::No => true,
-            _ => false,
-        }
-    }
-
-    /// True if the app may close (nothing unsaved, or the user decided).
-    fn confirm_close(&mut self) -> bool {
-        !self.retopo_dirty() || self.confirm_discard("The retopology has unsaved changes.")
-    }
-
-    fn update_title(&mut self) {
-        let mut title = String::new();
-        if let Some(path) = &self.retopo_path {
-            title += &jobs::display_name(path);
-        } else if !self.retopo.mesh().is_empty() {
-            title += "Untitled retopology";
-        }
-        if self.retopo_dirty() {
-            title += "*";
-        }
-        if !title.is_empty() {
-            title += " · ";
-        }
-        if self.mesh_info.triangles > 0 {
-            title += &self.mesh_info.name;
-            title += " — ";
-        }
-        title += "Polyflow";
-        if title != self.title {
-            self.window.set_title(&title);
-            self.title = title;
-        }
     }
 
     fn relax_all(&mut self) {
@@ -621,11 +549,15 @@ impl AppState {
             info.upload,
         );
         self.mesh_info = info;
+        self.reference_path = prepared.source_path;
         self.mesh = prepared.mesh;
         self.bvh = prepared.bvh;
         self.retopo.scene_radius = self.mesh.bounds().radius().max(1e-6);
         self.hover = None;
-        self.frame_mesh();
+        match self.pending_camera.take() {
+            Some(camera) => self.apply_camera(&camera),
+            None => self.frame_mesh(),
+        }
         if let Some(factor) = self.initial_zoom.take() {
             self.camera.zoom(1.0 / factor);
         }
@@ -851,10 +783,16 @@ impl AppState {
             }
         } else if actions.open_file {
             self.open_file_dialog();
+        } else if actions.new_project {
+            self.new_project();
+        } else if actions.open_project {
+            self.open_project_dialog();
+        } else if actions.save_project || actions.save_project_as {
+            self.save_project(actions.save_project_as);
         } else if actions.import_retopo {
             self.import_retopo();
-        } else if actions.save_retopo || actions.save_retopo_as {
-            self.save_retopo(actions.save_retopo_as);
+        } else if actions.export_retopo {
+            self.export_retopo();
         }
     }
 
@@ -883,6 +821,24 @@ impl AppState {
         ctx.layer_id_at(egui::pos2(pos.x / ppp, pos.y / ppp))
             .is_some_and(|layer| layer.order != egui::Order::Background)
     }
+}
+
+/// Without a console of its own (release builds on Windows), reuse the
+/// terminal the app was started from, if any, so logs and `--bench` output
+/// still show up there.
+fn attach_parent_console() {
+    #[cfg(all(windows, not(debug_assertions)))]
+    // SAFETY: plain Win32 call with a constant argument; it fails harmlessly
+    // when there is no parent console (e.g. started from the file explorer).
+    unsafe {
+        use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+fn is_project(path: &std::path::Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(polyflow_io::project::EXTENSION))
 }
 
 /// Exponential moving average, so displayed timings are readable.

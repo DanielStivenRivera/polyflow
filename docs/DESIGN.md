@@ -174,5 +174,7 @@ Profiling uses Tracy (CPU + GPU zones).
 
 - Pen tablet pressure input: `winit` support is limited; may need native
   Windows Ink / libinput handling.
-- Project file format: custom binary vs. a container such as SQLite.
+- ~~Project file format~~: decided in v0.1.1 — a zip (`.pflow`) holding a
+  versioned `project.json` and the retopology as polygon OBJ. Easy to inspect
+  and to extend with new entries (UVs, baked maps) without breaking old files.
 - UV unwrapping: in scope after v1.0?
