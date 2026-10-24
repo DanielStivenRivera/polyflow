@@ -158,7 +158,7 @@ Profiling uses Tracy (CPU + GPU zones).
 |---|---|
 | **v0.1** ✅ | Fast viewer for huge meshes · basic retopo (create, strips, relax, symmetry) · undo/redo · OBJ import/export |
 | **v0.2** ✅ | GPU baking (normal, AO) · UV import · cage · PNG/EXR export |
-| **v0.3** | Full retopo toolset · FBX / glTF · project files · autosave |
+| **v0.3** | Full retopo toolset · glTF / FBX / PLY import · sculpt cache · hard edges in bakes (project files and autosave shipped in 0.1.1) |
 | **v0.4** | Remaining bake maps · CLI batch baking · Python bindings (`pyo3`) |
 | **v1.0** | USD · DCC bridges (Blender, Maya, ZBrush) · stability and polish |
 
@@ -196,6 +196,31 @@ validated against.
 7. ✅ Bake panel with progress and cancel, map preview on the low-poly,
    `polyflow-cli bake`, export of the low-poly as baked (see below), release
    v0.2.0.
+
+### v0.3 milestones
+
+Goal: retopologize a whole character without leaving Polyflow. Selection
+comes first because every other tool builds on it; every operation is one
+undo step and respects symmetry.
+
+1. Selection: vertices, edges and faces by click, box and lasso; edge loop
+   and ring selection.
+2. Topology operations: weld/merge vertices, insert edge loop (with preview
+   and slide), cut faces, dissolve vertices and edges, rotate edge, delete
+   the selection.
+3. Building tools: extrude borders along the surface, bridge two loops, fill
+   holes (with a quad grid where the border allows), tweak/move brush.
+4. Formats: glTF 2.0 import of sculpts and export of the low-poly as baked
+   (normals, tangents, UVs); FBX import through `ufbx`; PLY import. FBX
+   export waits for a solid open-source writer.
+5. Sculpt cache: a binary cache of the prepared sculpt (mesh, meshlets,
+   BVH) so 10M triangles reopen within the 0.5 s budget.
+6. Hard edges in bakes: normals split at UV island borders or at marked
+   edges, baked and exported that way in the low-poly.
+7. Polish and release v0.3.0.
+
+Left for v0.4: height, cavity, curvature and ID maps; batch baking and
+Python bindings. UV unwrapping stays an open question.
 
 ### The low-poly as baked
 
