@@ -13,6 +13,7 @@ use crate::context::GpuContext;
 use crate::memory::{GpuImage, subresource_range};
 use crate::mesh::{CullStats, GpuMesh, MeshData, MeshPipeline, MeshView};
 use crate::overlay::{Overlay, OverlayRenderer, OverlayStyle};
+use crate::preview::{PreviewData, PreviewMode, PreviewRenderer};
 use crate::swapchain::Swapchain;
 use crate::timer::GpuTimer;
 
@@ -31,6 +32,10 @@ pub struct FrameInput<'a> {
     /// Geometry drawn over the reference mesh (retopology mesh, tool previews).
     pub overlays: &'a [&'a Overlay],
     pub overlay_style: OverlayStyle,
+    /// Draw the reference mesh (hidden to look at a bake preview alone).
+    pub show_reference: bool,
+    /// Draw the bake preview set with [`Renderer::set_preview`], this way.
+    pub preview: Option<PreviewMode>,
     pub ui: Option<UiFrame<'a>>,
 }
 
@@ -90,6 +95,7 @@ pub struct Renderer {
     frame_index: usize,
     mesh_pipeline: MeshPipeline,
     overlay: OverlayRenderer,
+    preview: PreviewRenderer,
     mesh: Option<GpuMesh>,
     timer: GpuTimer,
     /// GPU time of the most recently completed frame.
@@ -164,6 +170,7 @@ impl Renderer {
         let depth = create_depth(&ctx, swapchain.extent, depth_format)?;
         let mesh_pipeline = MeshPipeline::new(&ctx, swapchain.format, depth_format)?;
         let overlay = OverlayRenderer::new(&ctx, swapchain.format, depth_format)?;
+        let preview = PreviewRenderer::new(&ctx, swapchain.format, depth_format)?;
         let timer = GpuTimer::new(&ctx)?;
         let egui = egui_ash_renderer::Renderer::with_gpu_allocator(
             Arc::clone(&ctx.allocator),
@@ -189,6 +196,7 @@ impl Renderer {
             frame_index: 0,
             mesh_pipeline,
             overlay,
+            preview,
             mesh: None,
             timer,
             gpu_time: None,
@@ -255,6 +263,11 @@ impl Renderer {
         }
         self.mesh = Some(GpuMesh::upload(&self.ctx, self.command_pool, mesh)?);
         Ok(())
+    }
+
+    /// Replaces the bake preview (`None` to drop it). Waits for the GPU.
+    pub fn set_preview(&mut self, data: Option<&PreviewData<'_>>) -> Result<(), RenderError> {
+        self.preview.set(&self.ctx, self.command_pool, data)
     }
 
     /// Records, submits and presents one frame.
@@ -458,9 +471,13 @@ impl Renderer {
                 };
                 device.cmd_set_viewport(cmd, 0, &[viewport]);
                 device.cmd_set_scissor(cmd, 0, &[rect]);
-                if let Some(mesh) = &self.mesh {
+                if let Some(mesh) = self.mesh.as_ref().filter(|_| input.show_reference) {
                     self.mesh_pipeline
                         .draw(device, cmd, mesh, self.frame_index, &input.view);
+                }
+                if let Some(mode) = input.preview {
+                    self.preview
+                        .draw(device, cmd, input.view.view_proj, input.view.eye, mode);
                 }
                 self.overlay.draw(
                     device,
@@ -543,6 +560,7 @@ impl Drop for Renderer {
             }
             self.mesh_pipeline.destroy(&self.ctx);
             self.overlay.destroy(&self.ctx);
+            self.preview.destroy(&self.ctx);
             self.timer.destroy(&self.ctx);
             self.depth.destroy(&self.ctx);
             self.swapchain.destroy(&self.ctx);

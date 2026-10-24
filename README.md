@@ -7,8 +7,9 @@ multi-million-triangle sculpts, and bake the sculpt's detail into texture maps
 (normals, AO, height and more). It is built in Rust on Vulkan, with one rule
 above all: stay fast and stable on the heaviest meshes production throws at it.
 
-> **Status:** v0.1.1 preview. Manual retopology works end to end; baking is
-> next. See the [changelog](CHANGELOG.md) and the [roadmap](docs/DESIGN.md#8-roadmap).
+> **Status:** v0.2.0 preview. Retopology and baking (normal maps and ambient
+> occlusion, on the GPU) work end to end. See the [changelog](CHANGELOG.md)
+> and the [roadmap](docs/DESIGN.md#8-roadmap).
 
 ## Download
 
@@ -33,8 +34,10 @@ cargo run --release
 ```
 
 You need a stable Rust toolchain (installed automatically from
-`rust-toolchain.toml` via rustup) and, once the renderer lands, the
-[Vulkan SDK](https://vulkan.lunarg.com/) for validation layers in debug builds.
+`rust-toolchain.toml` via rustup) and a C compiler (for the MikkTSpace
+reference used in tests). The [Vulkan SDK](https://vulkan.lunarg.com/) is
+optional: it provides validation layers for debug builds and `slangc` to
+rebuild shaders, which otherwise come precompiled.
 
 ## Usage
 
@@ -73,6 +76,20 @@ retopology pushed out by *push* (3% of the sculpt's size by default). To shape
 it by hand, use **File → Export bake cage OBJ**, move its vertices in your
 modeling software (do not add, delete or reorder any) and bring it back with
 **Import bake cage OBJ**; it is saved with the project.
+
+### Baking
+
+The retopology needs UVs: unwrap it in your modeling software and import it
+(**File → Import retopology OBJ**); the **UV checker** shows them. Then, in
+the **Bake** panel on the right, pick the maps and press **Bake** (Ctrl+B).
+Rays start a set distance in front of the retopology (or from the bake cage)
+and look a set distance behind it; if the panel reports many missed texels,
+raise those distances. When the bake finishes, the viewport previews the
+low-poly with its maps.
+
+Next to the maps, the bake writes `<name>_low.obj`: the low-poly triangulated
+and with the normals it was baked with. Use that mesh in your engine with the
+maps, so the normal map shades as baked.
 
 The headless `polyflow-cli` loads meshes without a window, which is handy for
 pipelines and for benchmarking:

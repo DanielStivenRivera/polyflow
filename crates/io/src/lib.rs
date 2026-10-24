@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod image;
+pub mod lowpoly;
 pub mod obj;
 pub mod project;
 pub mod retopo;

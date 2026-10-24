@@ -4,6 +4,7 @@
 // next to the app. Debug builds keep the console for logs.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bake;
 mod bench;
 mod camera_control;
 mod jobs;
@@ -13,7 +14,7 @@ mod project;
 mod retopo;
 mod ui;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -70,6 +71,7 @@ macro_rules! tool_input {
 enum UserEvent {
     MeshReady(Box<Result<Prepared, String>>),
     DialogAnswer(modal::Answer),
+    BakeDone(Box<bake::BakeOutcome>),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -155,6 +157,10 @@ impl ApplicationHandler<UserEvent> for App {
                 state.dialog_answered(answer);
                 Ok(())
             }
+            UserEvent::BakeDone(outcome) => {
+                state.bake_done(*outcome);
+                Ok(())
+            }
         };
         self.handle(event_loop, result);
     }
@@ -166,6 +172,9 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(state) = &mut self.state {
             // A clean exit: the user saved or chose to discard.
             state.remove_autosave();
+            if let Some(job) = &state.bake_job {
+                job.control.cancel();
+            }
         }
         self.state = None;
     }
@@ -201,9 +210,10 @@ struct AppState {
     camera: OrbitCamera,
     controller: CameraController,
     ui: UiState,
-    /// CPU copy of the reference mesh, for bounds now and spatial queries later.
-    mesh: TriMesh,
-    bvh: Bvh,
+    /// CPU copy of the reference mesh, for picking, snapping and baking
+    /// (shared with bake threads).
+    mesh: Arc<TriMesh>,
+    bvh: Arc<Bvh>,
     mesh_info: MeshInfo,
     /// Surface under the cursor, updated as the cursor or camera moves.
     hover: Option<Hover>,
@@ -238,6 +248,15 @@ struct AppState {
     autosave: Autosave,
     /// The dialog being shown, if any.
     dialogs: modal::Dialogs,
+    /// Bake panel settings, saved with the project.
+    bake_state: polyflow_io::project::BakeState,
+    bake_job: Option<bake::BakeJob>,
+    /// The last finished bake, for the panel's summary and the preview.
+    last_bake: Option<Box<bake::BakeReport>>,
+    /// How the last bake is previewed, if it is.
+    preview_mode: Option<polyflow_render::PreviewMode>,
+    /// Keep drawing the sculpt while previewing.
+    preview_show_sculpt: bool,
     /// Set once the user agreed to close; the event loop exits next.
     exit_requested: bool,
     /// Title currently shown, to avoid resetting it every frame.
@@ -283,8 +302,8 @@ impl AppState {
             egui_state,
             camera: OrbitCamera::default(),
             controller: CameraController::default(),
-            mesh: TriMesh::default(),
-            bvh: Bvh::default(),
+            mesh: Arc::new(TriMesh::default()),
+            bvh: Arc::new(Bvh::default()),
             mesh_info: MeshInfo::empty(),
             hover: None,
             loading: None,
@@ -310,6 +329,11 @@ impl AppState {
             saved_reference: None,
             pending_camera: None,
             autosave: Autosave::new(options.bench.is_none()),
+            bake_state: polyflow_io::project::BakeState::default(),
+            bake_job: None,
+            last_bake: None,
+            preview_mode: None,
+            preview_show_sculpt: false,
             dialogs: modal::Dialogs::default(),
             exit_requested: false,
             title: String::new(),
@@ -449,6 +473,7 @@ impl AppState {
             Some("l") if ctrl => self.open_file_dialog(),
             Some("i") if ctrl => self.import_retopo(),
             Some("e") if ctrl => self.export_retopo(),
+            Some("b") if ctrl => self.start_bake(),
             Some("s") if ctrl => {
                 self.save_project(mods.shift_key(), |_| {});
             }
@@ -568,8 +593,8 @@ impl AppState {
         );
         self.mesh_info = info;
         self.reference_path = prepared.source_path;
-        self.mesh = prepared.mesh;
-        self.bvh = prepared.bvh;
+        self.mesh = Arc::new(prepared.mesh);
+        self.bvh = Arc::new(prepared.bvh);
         self.retopo.scene_radius = self.mesh.bounds().radius().max(1e-6);
         self.hover = None;
         match self.pending_camera.take() {
@@ -670,6 +695,7 @@ impl AppState {
             cursor_in_viewport,
         };
         let retopo_stats = self.retopo.stats();
+        let bake_blocker = self.bake_blocker(retopo_stats.uv_faces);
         let cage_imported = self
             .retopo
             .imported_cage()
@@ -696,12 +722,42 @@ impl AppState {
             face_kinds: retopo_stats.face_kinds,
             uv_faces: retopo_stats.uv_faces,
         };
+        let bake_output = bake::output_prefix(
+            &self.bake_state,
+            self.project_path.as_deref(),
+            self.reference_path.as_deref(),
+        );
+        let last_bake = self.last_bake.as_ref().map(|r| {
+            let maps = r.files.len().saturating_sub(1);
+            let covered = r.baked.hits + r.baked.misses;
+            let missed = 100.0 * r.baked.misses as f64 / covered.max(1) as f64;
+            format!(
+                "Baked {maps} map{} in {:.1} s on {}; {missed:.2}% of texels missed.",
+                if maps == 1 { "" } else { "s" },
+                r.time.as_secs_f64(),
+                r.device
+            )
+        });
+        let mut bake_ui = ui::BakeUi {
+            state: &mut self.bake_state,
+            scene_radius: self.retopo.scene_radius,
+            output: bake_output.display().to_string(),
+            progress: self
+                .bake_job
+                .as_ref()
+                .map(|j| (j.progress(), j.started.elapsed())),
+            blocker: bake_blocker,
+            last: last_bake,
+            has_preview: self.last_bake.is_some(),
+            preview: &mut self.preview_mode,
+            show_sculpt: &mut self.preview_show_sculpt,
+        };
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut actions = Actions::default();
         let mut viewport_rect = egui::Rect::NOTHING;
         let ui_state = &mut self.ui;
         let output = self.egui_state.egui_ctx().run_ui(raw_input, |ui| {
-            (actions, viewport_rect) = ui_state.show(ui, &stats, &mut retopo_ui)
+            (actions, viewport_rect) = ui_state.show(ui, &stats, &mut retopo_ui, &mut bake_ui)
         });
         self.egui_state
             .handle_platform_output(&self.window, output.platform_output);
@@ -742,8 +798,13 @@ impl AppState {
         let surface_offset = self.retopo.surface_offset;
         let view_proj = self.camera.view_projection(self.viewport_aspect());
         self.retopo.update_overlays();
-        let mut overlays = vec![self.retopo.mesh_overlay(), &self.tool_overlay];
-        overlays.extend(self.retopo.cage_overlay());
+        let preview = self.preview_mode.filter(|_| self.last_bake.is_some());
+        // The preview shows the low-poly as baked; the retopology would hide it.
+        let mut overlays = vec![&self.tool_overlay];
+        if preview.is_none() {
+            overlays.push(self.retopo.mesh_overlay());
+            overlays.extend(self.retopo.cage_overlay());
+        }
         self.renderer.set_vsync(self.ui.vsync);
 
         let [r, g, b] = self.ui.mesh_color;
@@ -758,6 +819,8 @@ impl AppState {
             },
             clear_color: BACKGROUND,
             overlays: &overlays,
+            show_reference: preview.is_none() || self.preview_show_sculpt,
+            preview,
             overlay_style: OverlayStyle {
                 line_width: 1.5 * ppp,
                 x_ray,
@@ -777,7 +840,13 @@ impl AppState {
         if self.ui.continuous || repaint_delay.is_zero() || actions.frame_mesh {
             self.window.request_redraw();
         } else {
-            self.next_repaint = Instant::now().checked_add(repaint_delay);
+            // Keep the progress bar moving while baking.
+            let delay = if self.bake_job.is_some() {
+                repaint_delay.min(Duration::from_millis(100))
+            } else {
+                repaint_delay
+            };
+            self.next_repaint = Instant::now().checked_add(delay);
             // Frame intervals are only meaningful while redrawing back to back.
             self.last_frame = None;
         }
@@ -830,6 +899,14 @@ impl AppState {
             self.import_retopo();
         } else if actions.export_retopo {
             self.export_retopo();
+        } else if actions.bake {
+            self.start_bake();
+        } else if actions.cancel_bake {
+            if let Some(job) = &self.bake_job {
+                job.control.cancel();
+            }
+        } else if actions.choose_bake_output {
+            self.choose_bake_output();
         } else if actions.import_cage {
             self.import_cage();
         } else if actions.export_cage {
@@ -892,4 +969,154 @@ fn smooth(value: &mut f32, sample: f32) {
     } else {
         *value * 0.9 + sample * 0.1
     };
+}
+
+impl AppState {
+    /// Why baking is not possible right now, if it is not. `uv_faces`: the
+    /// retopology's faces with UVs.
+    fn bake_blocker(&self, uv_faces: usize) -> Option<&'static str> {
+        if self.bake_job.is_some() {
+            Some("A bake is running.")
+        } else if self.loading.is_some() {
+            Some("The sculpt is still loading.")
+        } else if self.mesh.triangle_count() == 0 {
+            Some("Load a sculpt to bake from.")
+        } else if self.retopo.mesh().is_empty() {
+            Some("There is no retopology to bake onto.")
+        } else if uv_faces == 0 {
+            Some("The retopology has no UVs: unwrap it elsewhere and import it.")
+        } else if !(self.bake_state.tangent_normal
+            || self.bake_state.object_normal
+            || self.bake_state.ambient_occlusion)
+        {
+            Some("Choose at least one map.")
+        } else {
+            None
+        }
+    }
+
+    fn start_bake(&mut self) {
+        let uv_faces = self.retopo.stats().uv_faces;
+        if let Some(reason) = self.bake_blocker(uv_faces) {
+            self.ui.error = Some(reason.into());
+            return;
+        }
+        let cage = self.bake_state.use_cage.then(|| self.retopo.cage());
+        let low = polyflow_bake::BakeMesh::with_cage(self.retopo.mesh(), cage.as_ref());
+        let settings = bake::settings(&self.bake_state, self.retopo.scene_radius);
+        let format =
+            polyflow_io::image::MapFormat::from_name(&self.bake_state.format).unwrap_or_default();
+        let prefix = bake::output_prefix(
+            &self.bake_state,
+            self.project_path.as_deref(),
+            self.reference_path.as_deref(),
+        );
+        if low.faces_without_uvs > 0 {
+            self.tools.status = Some(format!(
+                "{} faces without UVs are left out of the bake.",
+                low.faces_without_uvs
+            ));
+        }
+        match bake::start(
+            self.proxy.clone(),
+            low,
+            Arc::clone(&self.mesh),
+            Arc::clone(&self.bvh),
+            settings,
+            format,
+            prefix,
+            self.bake_state.cpu,
+        ) {
+            Ok(job) => self.bake_job = Some(job),
+            Err(e) => self.ui.error = Some(format!("Could not start the bake: {e}")),
+        }
+        self.window.request_redraw();
+    }
+
+    fn bake_done(&mut self, outcome: bake::BakeOutcome) {
+        self.bake_job = None;
+        self.window.request_redraw();
+        match outcome {
+            bake::BakeOutcome::Done(report) => {
+                log::info!("Baked in {:?} on {}", report.time, report.device);
+                let folder = report
+                    .files
+                    .first()
+                    .and_then(|f| f.parent())
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_default();
+                self.tools.status = Some(format!("Bake saved in {folder}"));
+                if let Err(e) = self.upload_preview(&report) {
+                    log::error!("Could not show the bake preview: {e}");
+                }
+                self.last_bake = Some(report);
+            }
+            bake::BakeOutcome::Cancelled => self.tools.status = Some("Bake cancelled".into()),
+            bake::BakeOutcome::Failed(e) => self.ui.error = Some(e),
+        }
+    }
+
+    /// Shows `report` in the viewport, lit with its maps.
+    fn upload_preview(&mut self, report: &bake::BakeReport) -> anyhow::Result<()> {
+        let vertices: Vec<polyflow_render::PreviewVertex> = report
+            .low
+            .corners
+            .iter()
+            .map(|c| polyflow_render::PreviewVertex {
+                position: c.position.to_array(),
+                normal: c.normal.to_array(),
+                tangent: c.tangent.to_array(),
+                uv: c.uv.to_array(),
+            })
+            .collect();
+        fn map(m: &Option<polyflow_bake::Map>) -> Option<polyflow_render::PreviewMap<'_>> {
+            m.as_ref().map(|m| polyflow_render::PreviewMap {
+                width: m.width,
+                height: m.height,
+                channels: m.channels,
+                data: &m.data,
+            })
+        }
+        self.renderer
+            .set_preview(Some(&polyflow_render::PreviewData {
+                vertices: &vertices,
+                normal_map: map(&report.baked.tangent_normal),
+                directx: report.directx,
+                occlusion: map(&report.baked.ambient_occlusion),
+            }))?;
+        self.preview_mode = Some(polyflow_render::PreviewMode::Lit);
+        Ok(())
+    }
+
+    fn choose_bake_output(&mut self) {
+        let current = bake::output_prefix(
+            &self.bake_state,
+            self.project_path.as_deref(),
+            self.reference_path.as_deref(),
+        );
+        let folder = current.parent().map(Path::to_path_buf);
+        let name = current
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "bake".into());
+        self.ask(
+            move |parent| {
+                let mut dialog = rfd::FileDialog::new()
+                    .set_title("Bake output: maps are named <name>_normal and so on")
+                    .set_file_name(name)
+                    .set_parent(parent);
+                if let Some(folder) = folder.filter(|f| f.is_dir()) {
+                    dialog = dialog.set_directory(folder);
+                }
+                dialog.save_file()
+            },
+            |state, picked| {
+                if let Some(path) = picked {
+                    // The file picked is a name, not a file to write.
+                    let prefix = path.with_extension("");
+                    state.bake_state.output = Some(prefix.display().to_string());
+                }
+            },
+        );
+    }
 }

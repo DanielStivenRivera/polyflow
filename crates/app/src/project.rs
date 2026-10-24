@@ -142,6 +142,7 @@ impl AppState {
                 push: self.retopo.cage_push,
                 show: self.retopo.show_cage,
             },
+            bake: self.bake_state.clone(),
             tools: ToolState {
                 strip_width: t.strip_width,
                 brush_radius: t.brush_radius,
@@ -162,6 +163,7 @@ impl AppState {
         self.retopo.uv_checker = settings.uv_checker;
         self.retopo.cage_push = settings.cage.push;
         self.retopo.show_cage = settings.cage.show;
+        self.bake_state = settings.bake.clone();
         let t = settings.tools;
         self.tools.settings = ToolSettings {
             strip_width: t.strip_width,

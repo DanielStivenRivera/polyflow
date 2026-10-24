@@ -2113,7 +2113,7 @@ dependencies = [
 
 [[package]]
 name = "polyflow"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2134,7 +2134,7 @@ dependencies = [
 
 [[package]]
 name = "polyflow-bake"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "bevy_mikktspace",
  "mikktspace-sys",
@@ -2146,7 +2146,7 @@ dependencies = [
 
 [[package]]
 name = "polyflow-cli"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -2160,7 +2160,7 @@ dependencies = [
 
 [[package]]
 name = "polyflow-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "glam",
  "proptest",
@@ -2170,7 +2170,7 @@ dependencies = [
 
 [[package]]
 name = "polyflow-io"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "exr",
  "fast-float2",
@@ -2186,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "polyflow-render"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "ash",
  "ash-window",
@@ -2207,7 +2207,7 @@ dependencies = [
 
 [[package]]
 name = "polyflow-spatial"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "log",
  "polyflow-core",

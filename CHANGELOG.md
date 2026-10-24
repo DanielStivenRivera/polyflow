@@ -4,51 +4,45 @@ All notable changes to Polyflow are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-10-24
+
+Baking: bake normal maps and ambient occlusion from the sculpt onto the
+retopology, on the GPU, from the app or the command line.
 
 ### Added
 
-- UVs on the retopology, per face corner (seams need no split vertices).
-  Imported from OBJ (`vt`), written back on export and kept in project
-  files. Edits and undo keep them; faces built with the retopology tools
-  have none.
-- **UV checker** view: faces are shaded with a checker from their UVs, tinted
-  red along U and green along V; faces without UVs show in magenta. Turned on
-  automatically when an imported retopology has UVs. The panel shows how many
-  faces have UVs.
+- **Bake panel** (right side; Ctrl+B to bake): map size, antialiasing,
+  tangent-space normals (OpenGL or DirectX green), object-space normals and
+  ambient occlusion, ray distances or a cage, edge padding, file format and
+  output name. Bakes run in the background with a progress bar and Cancel;
+  the settings are saved with the project.
+- **Bake preview**: when a bake finishes, the viewport shows the low-poly as
+  baked, lit with its normal map and occlusion, or the raw normal or
+  occlusion map; the sculpt can be shown alongside or hidden.
+- **GPU baking** with hardware ray tracing (`VK_KHR_ray_query`), or through
+  the sculpt's BVH on GPUs without it, or on the CPU. All three give the
+  same maps. A 4096x4096 bake of normal maps and AO from a 10M-triangle
+  sculpt takes under a second on an RTX 4070 (about 10 s on a 32-thread
+  CPU).
+- Normal maps match what game engines expect: tangents are MikkTSpace,
+  identical bit for bit to the reference implementation, and the bake writes
+  `<name>_low.obj`, the low-poly triangulated with its normals exactly as
+  baked, to use with the maps. Against Blender's Cycles bake of the same
+  meshes, normals agree to 0.09° on average (`tools/validate-bake`).
+- **Bake cage**: rays can start from a cage around the retopology, automatic
+  (pushed out along the normals, adjustable) or edited in other software:
+  **File → Export bake cage OBJ**, move vertices, **Import bake cage OBJ**.
+  The cage can be shown in the viewport and is saved in the project.
+- Maps as 8- or 16-bit PNG or as OpenEXR (half or full float), antialiased
+  with up to 8x8 samples per texel, with edge padding so seams do not show
+  with filtering and mipmaps.
+- **UVs** on the retopology, per face corner: imported from OBJ, kept through
+  edits and undo, written on export and saved in projects. A **UV checker**
+  view shows them (faces without UVs in magenta: they cannot be baked).
+- `polyflow-cli bake <sculpt> <retopo> <out>` with all the panel's options,
+  and `polyflow-cli raster` to check a UV layout's coverage and overlaps.
 - Importing a mesh of more than 500,000 faces as retopology offers to load it
   as the reference mesh instead.
-- Groundwork for baking: the retopology is triangulated, given smooth normals
-  and MikkTSpace tangents identical to the reference implementation, and its
-  UV layout rasterized exactly once per texel (4096x4096 in about 0.2 s).
-  `polyflow-cli raster` runs these steps on an OBJ and reports coverage,
-  overlapping UVs and timings.
-- **Baking** (command line for now): `polyflow-cli bake sculpt.obj
-  retopo.obj out` bakes tangent-space normals (OpenGL, or DirectX with
-  `--directx`), object-space normals and ambient occlusion onto the
-  retopology's UVs, as 8-bit PNGs. Rays reach a set distance in front of and
-  behind the retopology; texels they miss are reported. A 4096x4096 bake of
-  all three maps from a 1M-triangle sculpt takes about 6 s on a 32-thread CPU.
-  Normal maps match Blender's Cycles bake of the same meshes to within 8-bit
-  rounding (`tools/validate-bake`).
-- **Bake cage**: bake rays can start from a cage around the retopology,
-  either automatic (pushed out along the normals, with an adjustable push) or
-  edited in other software: export it with **File → Export bake cage OBJ**,
-  move vertices, import it back. The cage can be shown in the viewport and is
-  saved in the project. On the command line: `--cage-push <d>` or
-  `--cage <cage.obj>`.
-- Baked maps can be saved as 16-bit PNG or as OpenEXR (half or full float)
-  besides 8-bit PNG (`--format png8|png16|exr16|exr32`), antialiased with
-  up to 8x8 samples per texel (`--samples`), and padded beyond the UV
-  islands so seams do not show with filtering and mipmaps (`--padding`,
-  16 texels by default, or `full`). In float, normal maps agree with
-  Cycles to 0.09° on average.
-- **GPU baking**: `polyflow-cli bake` runs on the GPU when there is one,
-  with hardware ray tracing (`VK_KHR_ray_query`) or, on GPUs without it,
-  through the sculpt's BVH in compute; `--cpu` bakes on the CPU. The maps
-  match the CPU baker's. A 4096x4096 bake of normal maps and AO from a
-  10M-triangle sculpt takes under a second on an RTX 4070 (about 10 s on a
-  32-thread CPU).
 
 ### Fixed
 
@@ -56,6 +50,16 @@ All notable changes to Polyflow are documented here. The format follows
   take seconds to appear or hang the app, with one CPU core at 100%. They now
   open on their own thread and show at once; the window keeps drawing and
   ignores input while one is open.
+
+### Known limitations
+
+- The retopology has no UV unwrapping: unwrap it in another program and
+  import it. Faces without UVs are left out of the bake.
+- Maps: tangent- and object-space normals and AO; height, cavity, curvature
+  and ID maps come later. Normals are smooth (no hard edges yet).
+- The baked low-poly and the maps' preview reflect the retopology at the time
+  of the bake.
+- Reference meshes: OBJ only.
 
 ## [0.1.1] - 2026-10-19
 
@@ -110,5 +114,6 @@ First public preview: load a sculpt, retopologize it by hand, save the result.
 - Missing retopology tools: selection, edge loops, bridge, extrude.
 - No native project format: save the retopology as OBJ (added in 0.1.1).
 
+[0.2.0]: https://github.com/DanielStivenRivera/polyflow/releases/tag/v0.2.0
 [0.1.1]: https://github.com/DanielStivenRivera/polyflow/releases/tag/v0.1.1
 [0.1.0]: https://github.com/DanielStivenRivera/polyflow/releases/tag/v0.1.0

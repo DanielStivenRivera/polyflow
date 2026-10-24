@@ -108,6 +108,28 @@ pub struct Actions {
     pub import_cage: bool,
     pub export_cage: bool,
     pub clear_cage: bool,
+    pub bake: bool,
+    pub cancel_bake: bool,
+    pub choose_bake_output: bool,
+}
+
+/// The bake panel's settings and state.
+#[derive(Debug)]
+pub struct BakeUi<'a> {
+    pub state: &'a mut polyflow_io::project::BakeState,
+    pub scene_radius: f32,
+    /// Where the maps will go (path prefix).
+    pub output: String,
+    /// Fraction done and time spent, while baking.
+    pub progress: Option<(f32, std::time::Duration)>,
+    /// Why baking is not possible right now.
+    pub blocker: Option<&'static str>,
+    /// Summary of the last bake.
+    pub last: Option<String>,
+    /// Whether there is a bake to preview.
+    pub has_preview: bool,
+    pub preview: &'a mut Option<polyflow_render::PreviewMode>,
+    pub show_sculpt: &'a mut bool,
 }
 
 /// Retopology state the UI shows and edits.
@@ -179,6 +201,7 @@ impl UiState {
         ui: &mut egui::Ui,
         stats: &Stats<'_>,
         retopo: &mut RetopoUi<'_>,
+        bake: &mut BakeUi<'_>,
     ) -> (Actions, egui::Rect) {
         let mut actions = Actions::default();
 
@@ -233,6 +256,15 @@ impl UiState {
                 });
             });
         });
+
+        egui::Panel::right("bake_panel")
+            .resizable(false)
+            .exact_size(270.0)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    bake_panel(ui, bake, &mut actions);
+                });
+            });
 
         egui::Panel::left("side_panel")
             .resizable(false)
@@ -573,6 +605,196 @@ fn retopo_panel(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Acti
                 *retopo.status = None;
             }
         });
+    }
+}
+
+fn bake_panel(ui: &mut egui::Ui, bake: &mut BakeUi<'_>, actions: &mut Actions) {
+    let state = &mut *bake.state;
+    let radius = bake.scene_radius;
+    let distance =
+        |ui: &mut egui::Ui, value: &mut Option<f32>, default: f32, label: &str, hint: &str| {
+            ui.horizontal(|ui| {
+                let mut v = value.unwrap_or(default);
+                let drag = egui::DragValue::new(&mut v)
+                    .speed(radius * 0.0005)
+                    .range(0.0..=radius * 2.0)
+                    .max_decimals(4);
+                ui.label(label);
+                if ui.add(drag).on_hover_text(hint).changed() {
+                    *value = Some(v);
+                }
+                if value.is_some() && ui.small_button("Auto").clicked() {
+                    *value = None;
+                }
+            });
+        };
+    ui.strong("Bake");
+    let idle = bake.progress.is_none();
+    ui.add_enabled_ui(idle, |ui| {
+        egui::Grid::new("bake_grid").num_columns(2).show(ui, |ui| {
+            ui.label("Size");
+            egui::ComboBox::from_id_salt("bake_size")
+                .selected_text(format!("{0} x {0}", state.size))
+                .show_ui(ui, |ui| {
+                    for size in crate::bake::SIZES {
+                        ui.selectable_value(&mut state.size, size, format!("{size} x {size}"));
+                    }
+                });
+            ui.end_row();
+            ui.label("Antialiasing");
+            egui::ComboBox::from_id_salt("bake_samples")
+                .selected_text(match state.samples {
+                    1 => "Off".to_owned(),
+                    n => format!("{n} x {n} samples"),
+                })
+                .show_ui(ui, |ui| {
+                    for n in [1, 2, 3, 4] {
+                        let text = if n == 1 {
+                            "Off".to_owned()
+                        } else {
+                            format!("{n} x {n} samples")
+                        };
+                        ui.selectable_value(&mut state.samples, n, text);
+                    }
+                });
+            ui.end_row();
+            ui.label("Format");
+            egui::ComboBox::from_id_salt("bake_format")
+                .selected_text(state.format.clone())
+                .show_ui(ui, |ui| {
+                    for format in polyflow_io::image::MapFormat::ALL {
+                        let label = match format {
+                            polyflow_io::image::MapFormat::Png8 => "PNG, 8-bit",
+                            polyflow_io::image::MapFormat::Png16 => "PNG, 16-bit",
+                            polyflow_io::image::MapFormat::ExrHalf => "EXR, half float",
+                            polyflow_io::image::MapFormat::ExrFloat => "EXR, float",
+                        };
+                        ui.selectable_value(&mut state.format, format.name().to_owned(), label);
+                    }
+                });
+            ui.end_row();
+        });
+
+        ui.label("Maps");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut state.tangent_normal, "Normal");
+            ui.selectable_value(&mut state.directx, false, "OpenGL")
+                .on_hover_text("Green up: Blender, Unity, Godot.");
+            ui.selectable_value(&mut state.directx, true, "DirectX")
+                .on_hover_text("Green down: Unreal, 3ds Max.");
+        });
+        ui.checkbox(&mut state.object_normal, "Object-space normal");
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut state.ambient_occlusion, "Ambient occlusion");
+            ui.add(
+                egui::DragValue::new(&mut state.ao_samples)
+                    .range(1..=512)
+                    .suffix(" rays"),
+            )
+            .on_hover_text("Rays per sample: more is smoother and slower.");
+        });
+        if state.ambient_occlusion {
+            let default = radius * 0.25;
+            distance(
+                ui,
+                &mut state.ao_distance,
+                default,
+                "  Reach",
+                "Occluders further away are ignored.",
+            );
+        }
+
+        ui.label("Rays");
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut state.use_cage, false, "Distance")
+                .on_hover_text("Start rays a fixed distance in front of the retopology.");
+            ui.selectable_value(&mut state.use_cage, true, "Cage")
+                .on_hover_text("Start rays on the bake cage (Retopology panel).");
+        });
+        let default = radius * 0.03;
+        if !state.use_cage {
+            distance(
+                ui,
+                &mut state.frontal,
+                default,
+                "  In front",
+                "How far in front of the retopology rays start.",
+            );
+        }
+        distance(
+            ui,
+            &mut state.rear,
+            default,
+            "  Behind",
+            "How far behind the retopology rays still look.",
+        );
+
+        ui.horizontal(|ui| {
+            ui.label("Padding");
+            ui.add_enabled(
+                !state.pad_full,
+                egui::DragValue::new(&mut state.padding)
+                    .range(0..=256)
+                    .suffix(" px"),
+            );
+            ui.checkbox(&mut state.pad_full, "Fill");
+        })
+        .response
+        .on_hover_text(
+            "Extend UV islands into the empty texels around them, so seams do not show.",
+        );
+        ui.checkbox(&mut state.cpu, "Bake on the CPU")
+            .on_hover_text("The GPU is used by default; both give the same maps.");
+        ui.horizontal(|ui| {
+            ui.label("Output");
+            if ui.small_button("Change…").clicked() {
+                actions.choose_bake_output = true;
+            }
+            if state.output.is_some() && ui.small_button("Default").clicked() {
+                state.output = None;
+            }
+        });
+        ui.add(egui::Label::new(egui::RichText::new(format!("{}_*", bake.output)).small()).wrap());
+    });
+
+    ui.add_space(4.0);
+    match bake.progress {
+        Some((fraction, elapsed)) => {
+            ui.add(egui::ProgressBar::new(fraction).show_percentage());
+            ui.horizontal(|ui| {
+                ui.label(format!("{:.1} s", elapsed.as_secs_f32()));
+                if ui.button("Cancel").clicked() {
+                    actions.cancel_bake = true;
+                }
+            });
+        }
+        None => {
+            let button = egui::Button::new("Bake").shortcut_text("Ctrl+B");
+            let response = ui.add_enabled(bake.blocker.is_none(), button);
+            if let Some(reason) = bake.blocker {
+                response.on_disabled_hover_text(reason);
+                ui.label(egui::RichText::new(reason).small().weak());
+            } else if response.clicked() {
+                actions.bake = true;
+            }
+        }
+    }
+    if let Some(last) = &bake.last {
+        ui.label(egui::RichText::new(last).small());
+    }
+    if bake.has_preview {
+        use polyflow_render::PreviewMode as Mode;
+        ui.horizontal(|ui| {
+            ui.label("Preview");
+            ui.selectable_value(bake.preview, None, "Off");
+            ui.selectable_value(bake.preview, Some(Mode::Lit), "Lit")
+                .on_hover_text("The low-poly as baked, lit with the normal map and occlusion.");
+            ui.selectable_value(bake.preview, Some(Mode::NormalMap), "Normal");
+            ui.selectable_value(bake.preview, Some(Mode::Occlusion), "AO");
+        });
+        if bake.preview.is_some() {
+            ui.checkbox(bake.show_sculpt, "Show the sculpt too");
+        }
     }
 }
 

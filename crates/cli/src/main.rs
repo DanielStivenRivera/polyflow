@@ -16,7 +16,9 @@ Usage:
   polyflow-cli bake <sculpt.obj> <retopo.obj> <out> [options]
                                            Bake normal maps and ambient occlusion from the sculpt
                                            onto the retopology's UVs with the CPU reference baker,
-                                           writing <out>_normal, <out>_object and <out>_ao
+                                           writing <out>_normal, <out>_object and <out>_ao, and
+                                           <out>_low.obj: the retopology as baked (triangulated,
+                                           with normals), the mesh to use the maps with
 
 Bake options (distances in scene units; defaults scale with the sculpt):
   --size <px>            Map size (default 2048)
@@ -473,5 +475,23 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
         .with_context(|| format!("writing {}", path.display()))?;
         println!("wrote       {}", path.display());
     }
+    let mut name = out.file_name().unwrap_or_default().to_owned();
+    name.push("_low.obj");
+    let path = out.with_file_name(name);
+    let corners: Vec<polyflow_io::lowpoly::MeshCorner> = low
+        .corners
+        .iter()
+        .map(|c| polyflow_io::lowpoly::MeshCorner {
+            position: c.position,
+            normal: c.normal,
+            uv: c.uv,
+        })
+        .collect();
+    polyflow_io::lowpoly::save_obj(&path, &corners)
+        .with_context(|| format!("writing {}", path.display()))?;
+    println!(
+        "wrote       {} (use the maps with this mesh)",
+        path.display()
+    );
     Ok(())
 }

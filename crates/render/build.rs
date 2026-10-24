@@ -12,7 +12,7 @@ use std::process::Command;
 use std::{env, fs};
 
 /// Shaders compiled to SPIR-V; other `.slang` files are only imported.
-const SHADERS: &[&str] = &["bake", "bake_rt", "cull", "mesh", "overlay"];
+const SHADERS: &[&str] = &["bake", "bake_rt", "cull", "mesh", "overlay", "preview"];
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());

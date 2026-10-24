@@ -8,12 +8,14 @@ pub mod context;
 mod memory;
 pub mod mesh;
 mod overlay;
+mod preview;
 mod renderer;
 mod swapchain;
 mod timer;
 
 pub use mesh::{CullStats, MeshData, MeshView};
 pub use overlay::{Overlay, OverlayLine, OverlayPoint, OverlayStyle, OverlayVertex, Rgba8};
+pub use preview::{PreviewData, PreviewMap, PreviewMode, PreviewVertex};
 pub use renderer::{FRAMES_IN_FLIGHT, FrameInput, Renderer, UiFrame, Viewport};
 
 /// Errors produced by the renderer.

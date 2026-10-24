@@ -157,7 +157,7 @@ Profiling uses Tracy (CPU + GPU zones).
 | Version | Content |
 |---|---|
 | **v0.1** ✅ | Fast viewer for huge meshes · basic retopo (create, strips, relax, symmetry) · undo/redo · OBJ import/export |
-| **v0.2** | GPU baking (normal, AO) · UV import · cage · PNG/EXR export |
+| **v0.2** ✅ | GPU baking (normal, AO) · UV import · cage · PNG/EXR export |
 | **v0.3** | Full retopo toolset · FBX / glTF · project files · autosave |
 | **v0.4** | Remaining bake maps · CLI batch baking · Python bindings (`pyo3`) |
 | **v1.0** | USD · DCC bridges (Blender, Maya, ZBrush) · stability and polish |
@@ -193,7 +193,7 @@ validated against.
 6. ✅ GPU baker: Vulkan compute with `VK_KHR_ray_query`, compute BVH
    traversal as fallback; matches the CPU reference within tolerance; hits
    the bake budget.
-7. Bake panel with progress and cancel, map preview on the low-poly,
+7. ✅ Bake panel with progress and cancel, map preview on the low-poly,
    `polyflow-cli bake`, export of the low-poly as baked (see below), release
    v0.2.0.
 

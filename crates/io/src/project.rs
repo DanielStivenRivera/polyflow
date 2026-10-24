@@ -154,6 +154,62 @@ pub struct ProjectSettings {
     pub uv_checker: bool,
     pub tools: ToolState,
     pub cage: CageState,
+    pub bake: BakeState,
+}
+
+/// Bake settings. Distances are in scene units; `None` derives them from
+/// the sculpt's size.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BakeState {
+    /// Map width and height.
+    pub size: u32,
+    /// Samples per texel along each axis.
+    pub samples: u32,
+    pub tangent_normal: bool,
+    pub object_normal: bool,
+    pub ambient_occlusion: bool,
+    /// Green down in tangent-space normal maps.
+    pub directx: bool,
+    pub ao_samples: u32,
+    pub ao_distance: Option<f32>,
+    /// Start rays from the cage instead of `frontal` in front.
+    pub use_cage: bool,
+    pub frontal: Option<f32>,
+    pub rear: Option<f32>,
+    /// Texels of edge padding; ignored if `pad_full`.
+    pub padding: u32,
+    pub pad_full: bool,
+    /// `polyflow_io::image::MapFormat` name.
+    pub format: String,
+    /// Output files are this path plus `_normal.png` and so on; `None`
+    /// names them after the project, next to it.
+    pub output: Option<String>,
+    /// Bake on the CPU even with a GPU.
+    pub cpu: bool,
+}
+
+impl Default for BakeState {
+    fn default() -> Self {
+        Self {
+            size: 2048,
+            samples: 1,
+            tangent_normal: true,
+            object_normal: false,
+            ambient_occlusion: true,
+            directx: false,
+            ao_samples: 32,
+            ao_distance: None,
+            use_cage: false,
+            frontal: None,
+            rear: None,
+            padding: 16,
+            pad_full: false,
+            format: crate::image::MapFormat::Png8.name().into(),
+            output: None,
+            cpu: false,
+        }
+    }
 }
 
 /// How the bake cage is set up and shown.
@@ -177,6 +233,7 @@ impl Default for ProjectSettings {
             uv_checker: false,
             tools: ToolState::default(),
             cage: CageState::default(),
+            bake: BakeState::default(),
         }
     }
 }
@@ -369,6 +426,12 @@ mod tests {
             cage: CageState {
                 push: Some(0.25),
                 show: true,
+            },
+            bake: BakeState {
+                size: 4096,
+                use_cage: true,
+                output: Some("out/hero".into()),
+                ..BakeState::default()
             },
             tools: ToolState {
                 strip_width: 55.0,
