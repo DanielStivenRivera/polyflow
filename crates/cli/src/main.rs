@@ -10,7 +10,9 @@ const USAGE: &str = "\
 Usage:
   polyflow-cli info <mesh.obj>             Load a mesh and print statistics and timings
   polyflow-cli bvh <mesh.obj>              Build the BVH and time raycasts and closest-point queries
-  polyflow-cli torus <rings> <out.obj>     Write a test torus with 2*rings*(rings/2) triangles";
+  polyflow-cli torus <rings> <out.obj>     Write a test torus with 2*rings*(rings/2) triangles
+  polyflow-cli raster <retopo.obj> [size]  Prepare a retopology for baking and rasterize its UVs
+                                           at size x size (default 4096), printing timings";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -23,6 +25,8 @@ fn main() -> ExitCode {
         ["info", path] => info(PathBuf::from(path)),
         ["bvh", path] => bvh(PathBuf::from(path)),
         ["torus", rings, out] => torus(rings, PathBuf::from(out)),
+        ["raster", path] => raster(PathBuf::from(path), "4096"),
+        ["raster", path, size] => raster(PathBuf::from(path), size),
         ["--version" | "-V"] => {
             println!("polyflow-cli {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -153,5 +157,62 @@ fn torus(rings: &str, out: PathBuf) -> anyhow::Result<()> {
         mesh.triangle_count(),
         out.display()
     );
+    Ok(())
+}
+
+fn raster(path: PathBuf, size: &str) -> anyhow::Result<()> {
+    let size: u32 = size.parse().context("size must be a positive integer")?;
+    if !(1..=polyflow_bake::raster::MAX_SIZE).contains(&size) {
+        bail!(
+            "size must be between 1 and {}",
+            polyflow_bake::raster::MAX_SIZE
+        );
+    }
+    let start = Instant::now();
+    let imported =
+        polyflow_io::retopo::load(&path).with_context(|| format!("loading {}", path.display()))?;
+    let load = start.elapsed();
+    let retopo = &imported.mesh;
+    println!(
+        "retopology  {} faces, {} vertices",
+        retopo.face_count(),
+        retopo.vertex_count()
+    );
+    println!("load        {:.3} s", load.as_secs_f64());
+
+    let start = Instant::now();
+    let mesh = polyflow_bake::BakeMesh::from_retopo(retopo);
+    println!(
+        "bake mesh   {:.3} s: {} triangles, normals and MikkTSpace tangents",
+        start.elapsed().as_secs_f64(),
+        mesh.triangle_count()
+    );
+    if mesh.faces_without_uvs > 0 {
+        println!("no UVs      {} faces left out", mesh.faces_without_uvs);
+    }
+
+    let start = Instant::now();
+    let raster = polyflow_bake::rasterize(&mesh, size, size, polyflow_core::glam::Vec2::splat(0.5));
+    let time = start.elapsed().as_secs_f64();
+    println!(
+        "rasterize   {time:.3} s at {size}x{size} ({:.0} M texels/s)",
+        (size as f64 * size as f64) / time / 1e6
+    );
+    println!("coverage    {:.1}%", raster.coverage() * 100.0);
+    if raster.overlaps > 0 {
+        println!(
+            "overlaps    {} texels covered twice or more",
+            raster.overlaps
+        );
+    }
+    if raster.degenerate > 0 {
+        println!(
+            "degenerate  {} triangles with zero UV area",
+            raster.degenerate
+        );
+    }
+    if raster.out_of_range > 0 {
+        println!("far UVs     {} triangles ignored", raster.out_of_range);
+    }
     Ok(())
 }

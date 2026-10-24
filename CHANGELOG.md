@@ -18,6 +18,11 @@ All notable changes to Polyflow are documented here. The format follows
   faces have UVs.
 - Importing a mesh of more than 500,000 faces as retopology offers to load it
   as the reference mesh instead.
+- Groundwork for baking: the retopology is triangulated, given smooth normals
+  and MikkTSpace tangents identical to the reference implementation, and its
+  UV layout rasterized exactly once per texel (4096x4096 in about 0.2 s).
+  `polyflow-cli raster` runs these steps on an OBJ and reports coverage,
+  overlapping UVs and timings.
 
 ### Fixed
 

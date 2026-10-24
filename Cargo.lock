@@ -207,6 +207,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "bevy_mikktspace"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bff34eb29ff4b8a8688bc7299f14fb6b597461ca80fec03ed7d22939ab33e48f"
+
+[[package]]
 name = "bit-set"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1486,6 +1492,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mikktspace-sys"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fe8e422f5a41c68485cbc0bf8e698e54c64d54355033be09667ff9bf786235c"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2069,8 +2084,11 @@ dependencies = [
 name = "polyflow-bake"
 version = "0.1.1"
 dependencies = [
+ "bevy_mikktspace",
+ "mikktspace-sys",
  "polyflow-core",
  "polyflow-spatial",
+ "rayon",
 ]
 
 [[package]]
@@ -2078,6 +2096,7 @@ name = "polyflow-cli"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "polyflow-bake",
  "polyflow-core",
  "polyflow-io",
  "polyflow-spatial",

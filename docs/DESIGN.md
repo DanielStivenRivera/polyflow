@@ -179,8 +179,8 @@ validated against.
 1. UVs on the retopology: per-corner UVs in the half-edge mesh, kept through
    edits and undo; `vt` in OBJ import/export; UVs in `.pflow`; checker
    preview in the viewport.
-2. Texture-space rasterization: triangulate the low-poly, per-texel position,
-   normal and tangent; tangent basis matching MikkTSpace exactly.
+2. ✅ Texture-space rasterization: triangulate the low-poly, per-texel
+   position, normal and tangent; tangent basis matching MikkTSpace exactly.
 3. CPU reference baker: tangent- and object-space normals and AO with
    ray-distance projection, on the CPU BVH with `rayon`; golden-image tests.
 4. Cage: automatic (low-poly pushed along averaged normals, adjustable) or
@@ -191,7 +191,28 @@ validated against.
    as fallback; matches the CPU reference within tolerance; hits the bake
    budget.
 7. Bake panel with progress and cancel, map preview on the low-poly,
-   `polyflow-cli bake`, release v0.2.0.
+   `polyflow-cli bake`, export of the low-poly as baked (see below), release
+   v0.2.0.
+
+### The low-poly as baked
+
+A tangent-space normal map is only correct for the exact triangles, normals
+and tangents it was baked with, and engines rebuild tangents from the mesh
+they import. Polyflow fixes all three (`polyflow-bake::mesh`):
+
+- **Triangles**: quads split along their shorter diagonal, other polygons
+  fanned from their first corner.
+- **Normals**: smooth, angle-weighted vertex normals computed on the polygons
+  (independent of the triangulation). Hard edges come later.
+- **Tangents**: MikkTSpace through `bevy_mikktspace`, which matches the
+  reference C code bit for bit; a test compares against that C code
+  (`mikktspace-sys`). The encoding inverts a MikkTSpace shader exactly: `N`
+  and `T` interpolated unnormalized, `B = sign · cross(N, T)` per pixel.
+
+So the mesh sent to the engine must be exported triangulated, with these
+normals, as part of the bake output. UV rasterization uses fixed-point
+coordinates (1/256 texel) and the top-left rule, like a GPU, so every texel
+inside a UV layout is covered exactly once.
 
 ## 9. Open questions
 
