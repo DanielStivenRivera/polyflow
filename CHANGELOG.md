@@ -23,6 +23,14 @@ All notable changes to Polyflow are documented here. The format follows
   UV layout rasterized exactly once per texel (4096x4096 in about 0.2 s).
   `polyflow-cli raster` runs these steps on an OBJ and reports coverage,
   overlapping UVs and timings.
+- **Baking** (command line for now): `polyflow-cli bake sculpt.obj
+  retopo.obj out` bakes tangent-space normals (OpenGL, or DirectX with
+  `--directx`), object-space normals and ambient occlusion onto the
+  retopology's UVs, as 8-bit PNGs. Rays reach a set distance in front of and
+  behind the retopology; texels they miss are reported. A 4096x4096 bake of
+  all three maps from a 1M-triangle sculpt takes about 6 s on a 32-thread CPU.
+  Normal maps match Blender's Cycles bake of the same meshes to within 8-bit
+  rounding (`tools/validate-bake`).
 
 ### Fixed
 

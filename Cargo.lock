@@ -2089,6 +2089,7 @@ dependencies = [
  "polyflow-core",
  "polyflow-spatial",
  "rayon",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2119,6 +2120,7 @@ version = "0.1.1"
 dependencies = [
  "fast-float2",
  "memchr",
+ "png",
  "polyflow-core",
  "rayon",
  "serde",

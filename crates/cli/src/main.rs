@@ -12,7 +12,19 @@ Usage:
   polyflow-cli bvh <mesh.obj>              Build the BVH and time raycasts and closest-point queries
   polyflow-cli torus <rings> <out.obj>     Write a test torus with 2*rings*(rings/2) triangles
   polyflow-cli raster <retopo.obj> [size]  Prepare a retopology for baking and rasterize its UVs
-                                           at size x size (default 4096), printing timings";
+                                           at size x size (default 4096), printing timings
+  polyflow-cli bake <sculpt.obj> <retopo.obj> <out> [options]
+                                           Bake normal maps and ambient occlusion from the sculpt
+                                           onto the retopology's UVs with the CPU reference baker,
+                                           writing <out>_normal.png, <out>_object.png, <out>_ao.png
+
+Bake options (distances in scene units; defaults scale with the sculpt):
+  --size <px>            Map size (default 2048)
+  --distance <d>         Ray reach in front of and behind the retopology (default 3% of the
+                         sculpt's bounding radius); --frontal and --rear set them apart
+  --ao-samples <n>       Occlusion rays per texel (default 32)
+  --ao-distance <d>      Occluders further away are ignored (default 25% of the radius)
+  --directx              Green down (-Y) in the tangent-space normal map, for Unreal";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -27,6 +39,12 @@ fn main() -> ExitCode {
         ["torus", rings, out] => torus(rings, PathBuf::from(out)),
         ["raster", path] => raster(PathBuf::from(path), "4096"),
         ["raster", path, size] => raster(PathBuf::from(path), size),
+        ["bake", sculpt, retopo, out, options @ ..] => bake(
+            PathBuf::from(sculpt),
+            PathBuf::from(retopo),
+            PathBuf::from(out),
+            options,
+        ),
         ["--version" | "-V"] => {
             println!("polyflow-cli {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -213,6 +231,136 @@ fn raster(path: PathBuf, size: &str) -> anyhow::Result<()> {
     }
     if raster.out_of_range > 0 {
         println!("far UVs     {} triangles ignored", raster.out_of_range);
+    }
+    Ok(())
+}
+
+fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> anyhow::Result<()> {
+    use polyflow_bake::{BakeControl, BakeSettings, NormalY, Reference};
+
+    let mut size = 2048u32;
+    let mut frontal = None;
+    let mut rear = None;
+    let mut ao_samples = None;
+    let mut ao_distance = None;
+    let mut directx = false;
+    let mut args = options.iter();
+    while let Some(&flag) = args.next() {
+        let mut number = |name: &str| -> anyhow::Result<f32> {
+            let value = args
+                .next()
+                .with_context(|| format!("{name} needs a value"))?;
+            let value: f32 = value
+                .parse()
+                .with_context(|| format!("{name} needs a number, got `{value}`"))?;
+            if !(value >= 0.0 && value.is_finite()) {
+                bail!("{name} must be a positive number");
+            }
+            Ok(value)
+        };
+        match flag {
+            "--size" => size = number(flag)? as u32,
+            "--distance" => {
+                let d = number(flag)?;
+                (frontal, rear) = (Some(d), Some(d));
+            }
+            "--frontal" => frontal = Some(number(flag)?),
+            "--rear" => rear = Some(number(flag)?),
+            "--ao-samples" => ao_samples = Some(number(flag)? as u32),
+            "--ao-distance" => ao_distance = Some(number(flag)?),
+            "--directx" => directx = true,
+            other => bail!("unknown bake option `{other}`"),
+        }
+    }
+    if !(1..=polyflow_bake::raster::MAX_SIZE).contains(&size) {
+        bail!(
+            "size must be between 1 and {}",
+            polyflow_bake::raster::MAX_SIZE
+        );
+    }
+
+    let start = Instant::now();
+    let loaded =
+        polyflow_io::load_mesh(&sculpt).with_context(|| format!("loading {}", sculpt.display()))?;
+    let high = loaded.mesh;
+    let bvh = polyflow_spatial::Bvh::build(&high);
+    println!(
+        "sculpt      {} triangles, loaded with its BVH in {:.2} s",
+        high.triangle_count(),
+        start.elapsed().as_secs_f64()
+    );
+
+    let start = Instant::now();
+    let imported = polyflow_io::retopo::load(&retopo)
+        .with_context(|| format!("loading {}", retopo.display()))?;
+    let low = polyflow_bake::BakeMesh::from_retopo(&imported.mesh);
+    println!(
+        "retopology  {} triangles, prepared in {:.2} s",
+        low.triangle_count(),
+        start.elapsed().as_secs_f64()
+    );
+    if low.faces_without_uvs > 0 {
+        println!("no UVs      {} faces left out", low.faces_without_uvs);
+    }
+    if low.triangle_count() == 0 {
+        bail!("the retopology has no faces with UVs to bake onto");
+    }
+
+    let radius = high.bounds().radius();
+    let mut settings = BakeSettings::for_scene(size, size, radius);
+    settings.frontal_distance = frontal.unwrap_or(settings.frontal_distance);
+    settings.rear_distance = rear.unwrap_or(settings.rear_distance);
+    settings.ao_samples = ao_samples.unwrap_or(settings.ao_samples);
+    settings.ao_distance = ao_distance.unwrap_or(settings.ao_distance);
+    if directx {
+        settings.normal_y = NormalY::DirectX;
+    }
+    println!(
+        "settings    {size}x{size}, rays {} in front / {} behind, AO {} rays within {}",
+        settings.frontal_distance,
+        settings.rear_distance,
+        settings.ao_samples,
+        settings.ao_distance
+    );
+
+    let start = Instant::now();
+    let reference = Reference {
+        mesh: &high,
+        bvh: &bvh,
+    };
+    let baked = polyflow_bake::bake(&low, reference, &settings, &BakeControl::default())?;
+    let time = start.elapsed().as_secs_f64();
+    let rays = baked.hits as f64 * (1.0 + settings.ao_samples as f64) + baked.misses as f64;
+    println!(
+        "bake        {time:.2} s ({:.1} M rays/s)",
+        rays / time.max(1e-9) / 1e6
+    );
+    let covered = baked.hits + baked.misses;
+    println!(
+        "texels      {} covered, {} missed ({:.2}%)",
+        covered,
+        baked.misses,
+        100.0 * baked.misses as f64 / covered.max(1) as f64
+    );
+    if baked.misses * 100 > covered {
+        println!(
+            "            more than 1% missed: try a larger --distance (or --frontal / --rear)"
+        );
+    }
+
+    let maps = [
+        ("normal", &baked.tangent_normal),
+        ("object", &baked.object_normal),
+        ("ao", &baked.ambient_occlusion),
+    ];
+    for (suffix, map) in maps {
+        let Some(map) = map else { continue };
+        let mut name = out.file_name().unwrap_or_default().to_owned();
+        name.push(format!("_{suffix}.png"));
+        let path = out.with_file_name(name);
+        polyflow_io::image::save_png(&path, map.width, map.height, map.channels, &map.data)
+            .with_context(|| format!("writing {}", path.display()))?;
+        println!("wrote       {}", path.display());
     }
     Ok(())
 }

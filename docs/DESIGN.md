@@ -181,8 +181,9 @@ validated against.
    preview in the viewport.
 2. ✅ Texture-space rasterization: triangulate the low-poly, per-texel
    position, normal and tangent; tangent basis matching MikkTSpace exactly.
-3. CPU reference baker: tangent- and object-space normals and AO with
-   ray-distance projection, on the CPU BVH with `rayon`; golden-image tests.
+3. ✅ CPU reference baker: tangent- and object-space normals and AO with
+   ray-distance projection, on the CPU BVH with `rayon`; analytic tests, and
+   a cross-check against Cycles (`tools/validate-bake`).
 4. Cage: automatic (low-poly pushed along averaged normals, adjustable) or
    imported from OBJ; shown in the viewport.
 5. Map export: PNG 8/16-bit and EXR half/float, with edge padding (dilation)
@@ -210,7 +211,19 @@ they import. Polyflow fixes all three (`polyflow-bake::mesh`):
   and `T` interpolated unnormalized, `B = sign · cross(N, T)` per pixel.
 
 So the mesh sent to the engine must be exported triangulated, with these
-normals, as part of the bake output. UV rasterization uses fixed-point
+normals, as part of the bake output. These are also Blender's conventions:
+`tools/validate-bake` bakes the same meshes in Cycles, and the normal maps
+agree to within 8-bit rounding (mean 0.2°).
+
+### Projection
+
+The CPU baker projects by ray distance: each texel's ray starts a frontal
+distance in front of the low-poly (along its smooth normal) and runs back to
+a rear distance behind it; the first reference surface met is baked, as
+Cycles and Substance do. Texels whose ray meets nothing are reported as
+misses. Ambient occlusion traces cosine-weighted rays from the hit, using the
+same Hammersley points in every texel, shifted per texel, so results are
+deterministic whatever the thread count. UV rasterization uses fixed-point
 coordinates (1/256 texel) and the top-left rule, like a GPU, so every texel
 inside a UV layout is covered exactly once.
 

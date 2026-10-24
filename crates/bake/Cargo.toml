@@ -13,6 +13,7 @@ polyflow-core.workspace = true
 polyflow-spatial.workspace = true
 bevy_mikktspace.workspace = true
 rayon.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 # The MikkTSpace reference C code, to check tangents bit for bit.

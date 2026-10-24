@@ -222,6 +222,46 @@ impl Bvh {
         best
     }
 
+    /// Whether the ray `origin + t * dir`, `0 <= t <= t_max`, hits anything.
+    /// Stops at the first hit found, so it is cheaper than [`Self::raycast`]
+    /// for visibility (ambient occlusion).
+    pub fn occluded(&self, mesh: &TriMesh, origin: Vec3, dir: Vec3, t_max: f32) -> bool {
+        if self.nodes.is_empty() {
+            return false;
+        }
+        let inv_dir = dir.recip();
+        let mut stack = [0u32; STACK_SIZE];
+        let mut len = 0;
+        if ray_box(origin, inv_dir, &self.nodes[0], t_max).is_some() {
+            stack[0] = 0;
+            len = 1;
+        }
+        while len > 0 {
+            len -= 1;
+            let index = stack[len] as usize;
+            let node = &self.nodes[index];
+            if node.count > 0 {
+                for &tri in self.leaf_triangles(node) {
+                    let [a, b, c] = triangle_vertices(mesh, tri);
+                    if let Some((t, _, _)) = triangle::intersect_ray(origin, dir, a, b, c)
+                        && t >= 0.0
+                        && t <= t_max
+                    {
+                        return true;
+                    }
+                }
+                continue;
+            }
+            for child in [index + 1, index + node.index as usize] {
+                if ray_box(origin, inv_dir, &self.nodes[child], t_max).is_some() {
+                    stack[len] = child as u32;
+                    len += 1;
+                }
+            }
+        }
+        false
+    }
+
     /// Point of the mesh closest to `p`, if any is within `max_distance`.
     pub fn closest_point(
         &self,
@@ -709,6 +749,17 @@ mod tests {
                     assert!((hit.t - t).abs() <= 1e-4 * t.max(1.0), "{t} vs {}", hit.t)
                 }
                 other => panic!("raycast mismatch: {other:?}"),
+            }
+            // Occlusion agrees on segments ending just past or short of the
+            // nearest hit.
+            match expected {
+                Some((t, _)) => {
+                    assert!(bvh.occluded(mesh, origin, dir, t * 1.001 + 1e-4));
+                    if t > 1e-2 {
+                        assert!(!bvh.occluded(mesh, origin, dir, t * 0.999 - 1e-4));
+                    }
+                }
+                None => assert!(!bvh.occluded(mesh, origin, dir, f32::INFINITY)),
             }
 
             let p = rng.vec3(7.0);

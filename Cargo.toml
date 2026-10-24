@@ -38,6 +38,7 @@ fast-float2 = "0.2"
 memchr = "2"
 rfd = "0.17"
 meshopt = "0.7"
+png = "0.18"
 # Bit-exact port of the MikkTSpace reference; its fixes for reference bugs
 # stay off so tangents match what engines compute.
 bevy_mikktspace = "1.0"
