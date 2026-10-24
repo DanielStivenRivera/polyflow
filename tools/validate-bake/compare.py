@@ -2,8 +2,9 @@
 #
 #   blender --background --factory-startup --python compare.py -- <dir>
 #
-# Expects in <dir>: blender_normal.npy (from make_pair.py), and ours_normal.png
-# and ours_object.png from `polyflow-cli bake high.obj low.obj <dir>/ours`.
+# Expects in <dir>: blender_normal.npy (from make_pair.py), and ours_normal and
+# ours_object from `polyflow-cli bake high.obj low.obj <dir>/ours --padding 0`,
+# as EXR (`--format exr32`, compared at full precision) or PNG.
 # Prints the angle between the two maps' normals over the texels Polyflow
 # baked, next to the error 8-bit rounding alone causes, and writes error.png
 # (black: equal, white: 10 degrees or more).
@@ -16,13 +17,15 @@ import numpy as np
 d = sys.argv[sys.argv.index("--") + 1]
 
 
-def load_png(name):
-    img = bpy.data.images.load(os.path.join(d, name))
+def load_map(stem):
+    exr = os.path.join(d, stem + ".exr")
+    path = exr if os.path.exists(exr) else os.path.join(d, stem + ".png")
+    img = bpy.data.images.load(path)
     img.colorspace_settings.name = "Non-Color"
     w, h = img.size
     px = np.empty(w * h * 4, dtype=np.float32)
     img.pixels.foreach_get(px)
-    return px.reshape(h, w, 4)
+    return px.reshape(h, w, 4), path
 
 
 def decode(c):
@@ -35,9 +38,12 @@ def angles(a, b):
 
 
 blender = np.load(os.path.join(d, "blender_normal.npy"))
-ours = load_png("ours_normal.png")
-# Polyflow's object-space map is exactly mid-gray outside the UV layout.
-mask = np.abs(load_png("ours_object.png")[..., :3] - 128 / 255).max(-1) > 1e-6
+ours, ours_path = load_map("ours_normal")
+print("comparing", os.path.basename(ours_path))
+# Polyflow's object-space map is exactly mid-gray outside the UV layout
+# (0.5, or 128/255 in an 8-bit PNG).
+obj, _ = load_map("ours_object")
+mask = np.minimum(np.abs(obj[..., :3] - 0.5), np.abs(obj[..., :3] - 128 / 255)).max(-1) > 1e-6
 
 error = angles(blender, ours)
 rounding = angles(blender, np.round(blender * 255) / 255)

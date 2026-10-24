@@ -186,8 +186,8 @@ validated against.
    a cross-check against Cycles (`tools/validate-bake`).
 4. ✅ Cage: automatic (low-poly pushed along averaged normals, adjustable) or
    imported from OBJ; shown in the viewport.
-5. Map export: PNG 8/16-bit and EXR half/float, with edge padding (dilation)
-   and supersampling.
+5. ✅ Map export: PNG 8/16-bit and EXR half/float, with edge padding
+   (dilation) and supersampling.
 6. GPU baker: Vulkan compute with `VK_KHR_ray_query`, compute BVH traversal
    as fallback; matches the CPU reference within tolerance; hits the bake
    budget.
@@ -231,7 +231,18 @@ exactly the rays of the frontal distance) or imported. An imported cage is
 matched to the retopology by vertex order and checked face by face, so the
 workflow is: export the cage from Polyflow, edit it elsewhere moving
 vertices only, import it back. It is stored in the project as `cage.obj`
-and falls back to the automatic cage once vertices are added or removed. Ambient occlusion traces cosine-weighted rays from the hit, using the
+and falls back to the automatic cage once vertices are added or removed.
+
+### Output
+
+Supersampling takes `n`² samples per texel on a regular grid, one
+rasterization pass per sample position; maps average the samples that hit
+(normals as vectors, renormalized). Sums accumulate in the output buffers
+themselves, so it costs two counters per texel, not a buffer per sample.
+Edge padding then grows the islands ring by ring, each new texel averaging
+its already-filled neighbors (copying the nearest texel instead smears noisy
+border texels into streaks). Maps are written as 8- or 16-bit PNG or as
+half/float OpenEXR, as linear data with no color space conversion. Ambient occlusion traces cosine-weighted rays from the hit, using the
 same Hammersley points in every texel, shifted per texel, so results are
 deterministic whatever the thread count. UV rasterization uses fixed-point
 coordinates (1/256 texel) and the top-left rule, like a GPU, so every texel

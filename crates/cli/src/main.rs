@@ -16,7 +16,7 @@ Usage:
   polyflow-cli bake <sculpt.obj> <retopo.obj> <out> [options]
                                            Bake normal maps and ambient occlusion from the sculpt
                                            onto the retopology's UVs with the CPU reference baker,
-                                           writing <out>_normal.png, <out>_object.png, <out>_ao.png
+                                           writing <out>_normal, <out>_object and <out>_ao
 
 Bake options (distances in scene units; defaults scale with the sculpt):
   --size <px>            Map size (default 2048)
@@ -28,7 +28,11 @@ Bake options (distances in scene units; defaults scale with the sculpt):
                          along its normals
   --ao-samples <n>       Occlusion rays per texel (default 32)
   --ao-distance <d>      Occluders further away are ignored (default 25% of the radius)
-  --directx              Green down (-Y) in the tangent-space normal map, for Unreal";
+  --directx              Green down (-Y) in the tangent-space normal map, for Unreal
+  --samples <n>          Antialiasing: n x n samples per texel, 1 to 8 (default 1)
+  --padding <px|full>    Extend UV islands this many texels into the background, or over the
+                         whole map (default 16)
+  --format <f>           png8 (default), png16, exr16 (half float) or exr32 (float)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -248,6 +252,10 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
     let mut ao_samples = None;
     let mut ao_distance = None;
     let mut directx = false;
+    let mut samples = None;
+    // `Some(None)`: fill the whole map.
+    let mut padding: Option<Option<u32>> = None;
+    let mut format = polyflow_io::image::MapFormat::Png8;
     let mut cage_path = None;
     let mut cage_push = None;
     let mut args = options.iter();
@@ -275,6 +283,31 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
             "--ao-samples" => ao_samples = Some(number(flag)? as u32),
             "--ao-distance" => ao_distance = Some(number(flag)?),
             "--directx" => directx = true,
+            "--samples" => {
+                let n = number(flag)? as u32;
+                if !(1..=polyflow_bake::MAX_SAMPLES).contains(&n) {
+                    bail!(
+                        "--samples must be between 1 and {}",
+                        polyflow_bake::MAX_SAMPLES
+                    );
+                }
+                samples = Some(n);
+            }
+            "--padding" => {
+                let value = args.next().context("--padding needs a value")?;
+                padding = Some(match *value {
+                    "full" => None,
+                    px => Some(px.parse().with_context(|| {
+                        format!("--padding needs a number of texels or `full`, got `{px}`")
+                    })?),
+                });
+            }
+            "--format" => {
+                let value = args.next().context("--format needs a value")?;
+                format = polyflow_io::image::MapFormat::from_name(value).with_context(|| {
+                    format!("unknown format `{value}`: use png8, png16, exr16 or exr32")
+                })?;
+            }
             "--cage" => {
                 let path = args.next().context("--cage needs a file")?;
                 cage_path = Some(PathBuf::from(path));
@@ -340,6 +373,10 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
     if directx {
         settings.normal_y = NormalY::DirectX;
     }
+    settings.samples = samples.unwrap_or(settings.samples);
+    if let Some(padding) = padding {
+        settings.padding = padding;
+    }
     let start_from = match (&cage_path, cage_push) {
         (Some(path), _) => format!("from the cage {}", path.display()),
         (None, Some(push)) => format!("from an automatic cage {push} out"),
@@ -349,6 +386,14 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
         "settings    {size}x{size}, rays {start_from} / {} behind, AO {} rays within {}",
         settings.rear_distance, settings.ao_samples, settings.ao_distance
     );
+    let padding_text = settings
+        .padding
+        .map_or("full".to_owned(), |p| format!("{p} texels"));
+    println!(
+        "            {n}x{n} samples per texel, padding {padding_text}, {}",
+        format.name(),
+        n = settings.samples
+    );
 
     let start = Instant::now();
     let reference = Reference {
@@ -357,7 +402,10 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
     };
     let baked = polyflow_bake::bake(&low, reference, &settings, &BakeControl::default())?;
     let time = start.elapsed().as_secs_f64();
-    let rays = baked.hits as f64 * (1.0 + settings.ao_samples as f64) + baked.misses as f64;
+    // Per sample: the projection ray, plus occlusion rays when it hits.
+    let samples = (settings.samples * settings.samples) as f64;
+    let rays =
+        samples * (baked.hits as f64 * (1.0 + settings.ao_samples as f64) + baked.misses as f64);
     println!(
         "bake        {time:.2} s ({:.1} M rays/s)",
         rays / time.max(1e-9) / 1e6
@@ -383,10 +431,17 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
     for (suffix, map) in maps {
         let Some(map) = map else { continue };
         let mut name = out.file_name().unwrap_or_default().to_owned();
-        name.push(format!("_{suffix}.png"));
+        name.push(format!("_{suffix}.{}", format.extension()));
         let path = out.with_file_name(name);
-        polyflow_io::image::save_png(&path, map.width, map.height, map.channels, &map.data)
-            .with_context(|| format!("writing {}", path.display()))?;
+        polyflow_io::image::save_map(
+            &path,
+            format,
+            map.width,
+            map.height,
+            map.channels,
+            &map.data,
+        )
+        .with_context(|| format!("writing {}", path.display()))?;
         println!("wrote       {}", path.display());
     }
     Ok(())

@@ -6,6 +6,7 @@
 //! - [`cage`]: where bake rays start: pushed out automatically or imported.
 //! - [`cpu`]: the CPU reference baker (normals, ambient occlusion).
 //! - [`mesh`]: the low-poly as baked (triangles, normals, MikkTSpace tangents).
+//! - [`padding`]: extending UV islands into the background.
 //! - [`raster`]: which triangle covers each texel of a map, and where.
 //! - [`tangent`]: tangent frames and the tangent-space encoding of normals.
 
@@ -14,12 +15,14 @@
 pub mod cage;
 pub mod cpu;
 pub mod mesh;
+pub mod padding;
 pub mod raster;
 pub mod tangent;
 
 pub use cage::{Cage, CageMismatch};
 pub use cpu::{
-    BakeControl, BakeError, BakeSettings, Baked, Coverage, Map, MapSet, NormalY, Reference, bake,
+    BakeControl, BakeError, BakeSettings, Baked, Coverage, MAX_SAMPLES, Map, MapSet, NormalY,
+    Reference, bake,
 };
 pub use mesh::{BakeMesh, Corner, SurfaceSample};
 pub use raster::{UvRaster, rasterize};

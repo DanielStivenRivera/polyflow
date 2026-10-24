@@ -20,6 +20,7 @@ use polyflow_spatial::Bvh;
 use rayon::prelude::*;
 
 use crate::mesh::BakeMesh;
+use crate::padding::Padding;
 use crate::raster::rasterize;
 
 /// The high-poly reference: its mesh and a BVH built from it.
@@ -62,9 +63,26 @@ pub struct BakeSettings {
     pub ao_samples: u32,
     /// Occluders further than this do not count, in scene units.
     pub ao_distance: f32,
+    /// Samples per texel along each axis (1 to 8): `samples`² per texel,
+    /// antialiasing edges in the detail and along UV borders.
+    pub samples: u32,
+    /// How many texels islands are extended by beyond their UV borders, so
+    /// filtering and mipmaps do not pull in the background; `None` fills the
+    /// whole map.
+    pub padding: Option<u32>,
 }
 
+/// Largest supported [`BakeSettings::samples`].
+pub const MAX_SAMPLES: u32 = 8;
+
 impl BakeSettings {
+    /// What [`BakeControl::rows_done`] reaches when the bake is done: every
+    /// row once per sample.
+    pub fn progress_rows(&self) -> u32 {
+        let n = self.samples.clamp(1, MAX_SAMPLES);
+        self.height * n * n
+    }
+
     /// Settings scaled to a reference mesh of bounding-sphere `radius`:
     /// rays reach 3% of it in front and behind, occlusion 25%.
     pub fn for_scene(width: u32, height: u32, radius: f32) -> Self {
@@ -81,6 +99,8 @@ impl BakeSettings {
             normal_y: NormalY::OpenGl,
             ao_samples: 32,
             ao_distance: radius * 0.25,
+            samples: 1,
+            padding: Some(16),
         }
     }
 }
@@ -147,7 +167,7 @@ impl BakeControl {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
-    /// Rows finished so far, out of the map height.
+    /// Rows finished so far, out of [`BakeSettings::progress_rows`].
     pub fn rows_done(&self) -> u32 {
         self.rows_done.load(Ordering::Relaxed)
     }
@@ -164,16 +184,26 @@ const FLAT_NORMAL: [f32; 3] = [0.5, 0.5, 1.0];
 const ZERO_NORMAL: [f32; 3] = [0.5, 0.5, 0.5];
 const UNOCCLUDED: [f32; 1] = [1.0];
 
-/// One row of every output.
+/// One row of every output, accumulated over a texel's samples.
 struct Row<'a> {
     y: u32,
+    /// Sum of tangent-space normals (unit vectors), before encoding.
     tangent: Option<&'a mut [f32]>,
+    /// Sum of reference normals; of low-poly normals while nothing was hit.
     object: Option<&'a mut [f32]>,
+    /// Sum of visibilities.
     ao: Option<&'a mut [f32]>,
-    coverage: &'a mut [Coverage],
+    /// Samples that hit the reference.
+    hits: &'a mut [u16],
+    /// Samples inside the UV layout.
+    covered: &'a mut [u16],
 }
 
 /// Bakes `settings.maps` from `reference` onto `low`'s UVs.
+///
+/// Each texel is sampled `settings.samples`² times on a regular grid; maps
+/// average the samples that hit the reference (normals are averaged as
+/// vectors and renormalized). Then edge padding extends the islands.
 pub fn bake(
     low: &BakeMesh,
     reference: Reference<'_>,
@@ -181,53 +211,119 @@ pub fn bake(
     control: &BakeControl,
 ) -> Result<Baked, BakeError> {
     let (width, height) = (settings.width, settings.height);
-    let raster = rasterize(low, width, height, Vec2::splat(0.5));
+    let texels = width as usize * height as usize;
     let maps = settings.maps;
-    let make = |wanted: bool, value: &[f32]| wanted.then(|| Map::filled(width, height, value));
-    let mut out = Baked {
-        tangent_normal: make(maps.tangent_normal, &FLAT_NORMAL),
-        object_normal: make(maps.object_normal, &ZERO_NORMAL),
-        ambient_occlusion: make(maps.ambient_occlusion, &UNOCCLUDED),
-        coverage: vec![Coverage::Empty; width as usize * height as usize],
-        hits: 0,
-        misses: 0,
+    let zeros = |wanted: bool, channels: usize| {
+        wanted.then(|| Map::filled(width, height, &vec![0.0; channels]))
     };
+    let mut tangent = zeros(maps.tangent_normal, 3);
+    let mut object = zeros(maps.object_normal, 3);
+    let mut occlusion = zeros(maps.ambient_occlusion, 1);
+    let mut hits = vec![0u16; texels];
+    let mut covered = vec![0u16; texels];
     let ao = AoSampler::new(settings, reference.mesh);
 
+    let n = settings.samples.clamp(1, MAX_SAMPLES);
     let w = width as usize;
-    let mut rows: Vec<Row<'_>> = Vec::with_capacity(height as usize);
-    {
-        let mut tangent = row_slices(&mut out.tangent_normal, height);
-        let mut object = row_slices(&mut out.object_normal, height);
-        let mut occlusion = row_slices(&mut out.ambient_occlusion, height);
-        for (y, coverage) in out.coverage.chunks_mut(w).enumerate() {
-            rows.push(Row {
+    for pass in 0..n * n {
+        let offset = Vec2::new(
+            ((pass % n) as f32 + 0.5) / n as f32,
+            ((pass / n) as f32 + 0.5) / n as f32,
+        );
+        let raster = rasterize(low, width, height, offset);
+        let mut tangent_rows = row_slices(&mut tangent, height);
+        let mut object_rows = row_slices(&mut object, height);
+        let mut ao_rows = row_slices(&mut occlusion, height);
+        let rows: Vec<Row<'_>> = hits
+            .chunks_mut(w)
+            .zip(covered.chunks_mut(w))
+            .enumerate()
+            .map(|(y, (hits, covered))| Row {
                 y: y as u32,
-                tangent: tangent.next().flatten(),
-                object: object.next().flatten(),
-                ao: occlusion.next().flatten(),
-                coverage,
-            });
+                tangent: tangent_rows.next().flatten(),
+                object: object_rows.next().flatten(),
+                ao: ao_rows.next().flatten(),
+                hits,
+                covered,
+            })
+            .collect();
+        rows.into_par_iter().for_each(|mut row| {
+            if control.cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            bake_row(&mut row, low, reference, &raster, settings, &ao, pass);
+            control.rows_done.fetch_add(1, Ordering::Relaxed);
+        });
+        if control.cancel.load(Ordering::Relaxed) {
+            return Err(BakeError::Cancelled);
         }
     }
 
-    let counts: Vec<(usize, usize)> = rows
-        .into_par_iter()
-        .map(|mut row| {
-            if control.cancel.load(Ordering::Relaxed) {
-                return (0, 0);
-            }
-            let counts = bake_row(&mut row, low, reference, &raster, settings, &ao);
-            control.rows_done.fetch_add(1, Ordering::Relaxed);
-            counts
-        })
-        .collect();
-    if control.cancel.load(Ordering::Relaxed) {
-        return Err(BakeError::Cancelled);
+    // Turn sums into values; neutral values where nothing was hit.
+    let mut out = Baked {
+        tangent_normal: tangent,
+        object_normal: object,
+        ambient_occlusion: occlusion,
+        coverage: hits
+            .iter()
+            .zip(&covered)
+            .map(|(&h, &c)| match (h, c) {
+                (_, 0) => Coverage::Empty,
+                (0, _) => Coverage::Missed,
+                _ => Coverage::Hit,
+            })
+            .collect(),
+        hits: 0,
+        misses: 0,
+    };
+    out.hits = out.coverage.iter().filter(|&&c| c == Coverage::Hit).count();
+    out.misses = out
+        .coverage
+        .iter()
+        .filter(|&&c| c == Coverage::Missed)
+        .count();
+    let coverage = &out.coverage;
+    if let Some(map) = &mut out.tangent_normal {
+        map.data
+            .par_chunks_mut(3)
+            .zip(coverage)
+            .for_each(|(t, &c)| {
+                let value = match c {
+                    Coverage::Hit => color(Vec3::from_slice(t).normalize_or(Vec3::Z)),
+                    _ => FLAT_NORMAL,
+                };
+                t.copy_from_slice(&value);
+            });
     }
-    for (hits, misses) in counts {
-        out.hits += hits;
-        out.misses += misses;
+    if let Some(map) = &mut out.object_normal {
+        map.data
+            .par_chunks_mut(3)
+            .zip(coverage)
+            .for_each(|(t, &c)| {
+                let value = match c {
+                    Coverage::Empty => ZERO_NORMAL,
+                    _ => color(Vec3::from_slice(t).normalize_or_zero()),
+                };
+                t.copy_from_slice(&value);
+            });
+    }
+    if let Some(map) = &mut out.ambient_occlusion {
+        map.data
+            .par_iter_mut()
+            .zip(&hits)
+            .for_each(|(v, &h)| *v = if h > 0 { *v / h as f32 } else { UNOCCLUDED[0] });
+    }
+
+    let padding = Padding::new(width, height, &out.coverage, settings.padding);
+    for map in [
+        &mut out.tangent_normal,
+        &mut out.object_normal,
+        &mut out.ambient_occlusion,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        padding.apply(map);
     }
     Ok(out)
 }
@@ -244,6 +340,7 @@ fn row_slices(map: &mut Option<Map>, height: u32) -> impl Iterator<Item = Option
     rows.into_iter()
 }
 
+/// Adds sample `pass` of every texel of `row` to the sums.
 fn bake_row(
     row: &mut Row<'_>,
     low: &BakeMesh,
@@ -251,29 +348,36 @@ fn bake_row(
     raster: &crate::UvRaster,
     settings: &BakeSettings,
     ao: &AoSampler,
-) -> (usize, usize) {
-    let (mut hits, mut misses) = (0, 0);
+    pass: u32,
+) {
     let y = row.y;
     for x in 0..settings.width {
         let Some((t, bary)) = raster.texel(x, y) else {
             continue;
         };
         let xi = x as usize;
+        row.covered[xi] += 1;
         let sample = low.sample(t as usize, bary);
         let normal = sample.frame.normal.normalize_or_zero();
         let hit = ray(low, &sample, normal, settings).and_then(|(origin, dir, reach)| {
             reference.bvh.raycast(reference.mesh, origin, dir, reach)
         });
+        let add = |slot: &mut [f32], v: Vec3| {
+            for (s, v) in slot.iter_mut().zip(v.to_array()) {
+                *s += v;
+            }
+        };
         let Some(hit) = hit else {
-            row.coverage[xi] = Coverage::Missed;
-            misses += 1;
-            if let Some(object) = &mut row.object {
-                object[xi * 3..xi * 3 + 3].copy_from_slice(&color(normal));
+            // Until something is hit, the object map shows the low-poly.
+            if row.hits[xi] == 0
+                && let Some(object) = &mut row.object
+            {
+                add(&mut object[xi * 3..xi * 3 + 3], normal);
             }
             continue;
         };
-        row.coverage[xi] = Coverage::Hit;
-        hits += 1;
+        let first_hit = row.hits[xi] == 0;
+        row.hits[xi] += 1;
 
         let surface = SurfacePoint::at(reference.mesh, hit.triangle, hit.u, hit.v);
         if let Some(tangent) = &mut row.tangent {
@@ -281,16 +385,20 @@ fn bake_row(
             if settings.normal_y == NormalY::DirectX {
                 n.y = -n.y;
             }
-            tangent[xi * 3..xi * 3 + 3].copy_from_slice(&color(n));
+            add(&mut tangent[xi * 3..xi * 3 + 3], n);
         }
         if let Some(object) = &mut row.object {
-            object[xi * 3..xi * 3 + 3].copy_from_slice(&color(surface.normal));
+            let slot = &mut object[xi * 3..xi * 3 + 3];
+            if first_hit {
+                // Drop the low-poly normals summed by earlier misses.
+                slot.fill(0.0);
+            }
+            add(slot, surface.normal);
         }
         if let Some(occlusion) = &mut row.ao {
-            occlusion[xi] = ao.visibility(reference, &surface, x, y);
+            occlusion[xi] += ao.visibility(reference, &surface, x, y, pass);
         }
     }
-    (hits, misses)
 }
 
 /// The texel's ray: origin, unit direction and length. From the cage point
@@ -388,11 +496,18 @@ impl AoSampler {
 
     /// Fraction of the hemisphere above `surface` that sees nothing within
     /// `distance`, cosine-weighted.
-    fn visibility(&self, reference: Reference<'_>, surface: &SurfacePoint, x: u32, y: u32) -> f32 {
+    fn visibility(
+        &self,
+        reference: Reference<'_>,
+        surface: &SurfacePoint,
+        x: u32,
+        y: u32,
+        pass: u32,
+    ) -> f32 {
         let n = surface.normal;
         let (t, b) = n.any_orthonormal_pair();
         let origin = surface.position + surface.face_normal * self.bias;
-        let shift = texel_random(x, y);
+        let shift = texel_random(x, y, pass);
         let mut occluded = 0;
         for &p in &self.points {
             let p = (p + shift).fract();
@@ -421,14 +536,14 @@ fn radical_inverse(i: u32) -> f32 {
     i.reverse_bits() as f32 * (1.0 / 4_294_967_296.0)
 }
 
-/// Two well-mixed numbers in 0..1 for a texel (PCG-style hash).
-fn texel_random(x: u32, y: u32) -> Vec2 {
+/// Two well-mixed numbers in 0..1 for a texel's sample (PCG-style hash).
+fn texel_random(x: u32, y: u32, pass: u32) -> Vec2 {
     let hash = |mut v: u32| {
         v = v.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
         let w = ((v >> ((v >> 28) + 4)) ^ v).wrapping_mul(277_803_737);
         (w >> 22) ^ w
     };
-    let a = hash(x ^ hash(y));
+    let a = hash(x ^ hash(y ^ hash(pass)));
     let b = hash(a);
     Vec2::new(a as f32, b as f32) * (1.0 / 4_294_967_296.0)
 }
@@ -441,11 +556,22 @@ mod tests {
     /// An `n` x `n` grid of quads over `[min, max]²` with heights `z(x, y)`,
     /// facing +Z (or -Z if `down`).
     fn sheet(min: f32, max: f32, n: usize, down: bool, z: impl Fn(f32, f32) -> f32) -> TriMesh {
+        sheet_rect([min, max], [min, max], n, down, z)
+    }
+
+    /// Like [`sheet`] over `xs` x `ys`.
+    fn sheet_rect(
+        xs: [f32; 2],
+        ys: [f32; 2],
+        n: usize,
+        down: bool,
+        z: impl Fn(f32, f32) -> f32,
+    ) -> TriMesh {
         let mut mesh = TriMesh::default();
-        let step = (max - min) / n as f32;
+        let step = [(xs[1] - xs[0]) / n as f32, (ys[1] - ys[0]) / n as f32];
         for j in 0..=n {
             for i in 0..=n {
-                let (x, y) = (min + i as f32 * step, min + j as f32 * step);
+                let (x, y) = (xs[0] + i as f32 * step[0], ys[0] + j as f32 * step[1]);
                 mesh.positions.push(Vec3::new(x, y, z(x, y)));
             }
         }
@@ -590,6 +716,94 @@ mod tests {
         let slanted = run(&BakeMesh::with_cage(&retopo, Some(&cage)), &high, &settings);
         assert_eq!(hit_columns(&slanted), 16);
         assert_eq!(slanted.misses + slanted.hits, 32 * 32);
+    }
+
+    #[test]
+    fn samples_average_within_a_texel() {
+        // The reference steps at x = 2.06: flat to the left, tilted by 30° to
+        // the right. Texel column 16 spans x 2.0..2.125; its center (2.0625)
+        // is right of the step, but of its 2x2 samples (x 2.031 and 2.094)
+        // half fall on each side.
+        let low = BakeMesh::from_retopo(&uv_grid(4, false));
+        let k = 30f32.to_radians().tan();
+        let high = merge(&[
+            sheet_rect([-1.0, 2.06], [-1.0, 5.0], 8, false, |_, _| 0.2),
+            sheet_rect([2.06, 5.0], [-1.0, 5.0], 8, false, |x, _| {
+                0.1 + k * (x - 2.06)
+            }),
+        ]);
+        let tilted = Vec3::new(-k, 0.0, 1.0).normalize();
+        let texel = |baked: &Baked, x: u32| {
+            Vec3::from_slice(baked.tangent_normal.as_ref().unwrap().texel(x, 10))
+        };
+        let mut settings = settings(32, 2.0, 2.0);
+        let single = run(&low, &high, &settings);
+        assert!(texel(&single, 16).distance(Vec3::from(color(tilted))) < 1e-4);
+        assert!(texel(&single, 15).distance(Vec3::from(FLAT_NORMAL)) < 1e-4);
+
+        settings.samples = 2;
+        assert_eq!(settings.progress_rows(), 32 * 4);
+        let control = BakeControl::default();
+        let bvh = Bvh::build(&high);
+        let reference = Reference {
+            mesh: &high,
+            bvh: &bvh,
+        };
+        let multi = bake(&low, reference, &settings, &control).unwrap();
+        assert_eq!(control.rows_done(), settings.progress_rows());
+        let mixed = color((Vec3::Z + tilted).normalize());
+        assert!(
+            texel(&multi, 16).distance(Vec3::from(mixed)) < 1e-4,
+            "{}",
+            texel(&multi, 16)
+        );
+        assert!(texel(&multi, 15).distance(Vec3::from(FLAT_NORMAL)) < 1e-4);
+        assert!(texel(&multi, 17).distance(Vec3::from(color(tilted))) < 1e-4);
+        assert_eq!((multi.hits, multi.misses), (32 * 32, 0));
+    }
+
+    #[test]
+    fn padding_fills_the_background() {
+        // The UV layout covers only the lower-left quarter of the map.
+        let mut retopo = uv_grid(2, false);
+        let faces: Vec<_> = retopo.faces().collect();
+        for f in faces {
+            let uvs: Vec<_> = retopo
+                .face_uvs(f)
+                .unwrap()
+                .iter()
+                .map(|uv| *uv * 0.5)
+                .collect();
+            retopo.set_face_uvs(f, &uvs);
+        }
+        let low = BakeMesh::from_retopo(&retopo);
+        let high = sheet(-1.0, 3.0, 4, false, |x, _| 0.3 * x);
+        let is_background = |t: &[f32]| t == ZERO_NORMAL;
+        let mut settings = settings(16, 2.0, 2.0);
+        settings.padding = Some(0);
+        let bare = run(&low, &high, &settings);
+        assert_eq!(bare.hits, 64);
+        let object = bare.object_normal.unwrap();
+        assert_eq!(
+            object.data.chunks(3).filter(|t| is_background(t)).count(),
+            256 - 64
+        );
+
+        settings.padding = Some(2);
+        let padded = run(&low, &high, &settings).object_normal.unwrap();
+        // The 8x8 island grows by 2 texels up and to the right.
+        assert_eq!(
+            padded.data.chunks(3).filter(|t| is_background(t)).count(),
+            256 - 100
+        );
+        settings.padding = None;
+        let full = run(&low, &high, &settings).object_normal.unwrap();
+        assert!(full.data.chunks(3).all(|t| !is_background(t)));
+        assert_eq!(
+            full.texel(15, 0),
+            object.texel(7, 8),
+            "copied from the island's corner"
+        );
     }
 
     #[test]

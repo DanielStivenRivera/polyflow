@@ -80,7 +80,7 @@ pipelines and for benchmarking:
 ```sh
 polyflow-cli info path/to/sculpt.obj
 polyflow-cli raster path/to/retopo.obj 4096   # prepare for baking, rasterize the UVs
-polyflow-cli bake sculpt.obj retopo.obj out/character --size 4096
+polyflow-cli bake sculpt.obj retopo.obj out/character --size 4096 --samples 2 --format png16
 polyflow-cli bake sculpt.obj retopo.obj out/character --cage character_cage.obj
 ```
 
