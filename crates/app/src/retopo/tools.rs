@@ -470,10 +470,7 @@ impl Tools {
             let p: Vec<Vec3> = mesh.face_vertices(f).map(|v| mesh.position(v)).collect();
             for i in 1..p.len().saturating_sub(1) {
                 for q in [p[0], p[i], p[i + 1]] {
-                    out.triangles.push(OverlayVertex {
-                        position: q,
-                        color: HOVER_FACE_COLOR,
-                    });
+                    out.triangles.push(OverlayVertex::flat(q, HOVER_FACE_COLOR));
                 }
             }
         }

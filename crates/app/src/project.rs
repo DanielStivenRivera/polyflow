@@ -7,6 +7,7 @@ use polyflow_core::camera::OrbitCamera;
 use polyflow_core::glam::Vec3;
 use polyflow_core::halfedge::HalfEdgeMesh;
 use polyflow_io::project::{self, CameraState, ProjectSettings, ReferencePath, ToolState};
+use polyflow_io::retopo::ImportedRetopo;
 
 use crate::AppState;
 use crate::jobs::{self, Job};
@@ -16,6 +17,9 @@ use crate::retopo::tools::ToolSettings;
 /// How often unsaved work is written to the recovery folder.
 pub const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(120);
 const AUTOSAVE_PREFIX: &str = "autosave-";
+/// Retopologies above this many faces are probably sculpts imported by
+/// mistake; importing asks whether to load them as the reference instead.
+const SCULPT_FACES: usize = 500_000;
 
 /// Autosave bookkeeping.
 #[derive(Debug)]
@@ -130,6 +134,7 @@ impl AppState {
             }),
             x_ray: self.retopo.x_ray,
             surface_offset: self.retopo.surface_offset,
+            uv_checker: self.retopo.uv_checker,
             tools: ToolState {
                 strip_width: t.strip_width,
                 brush_radius: t.brush_radius,
@@ -147,6 +152,7 @@ impl AppState {
         });
         self.retopo.x_ray = settings.x_ray;
         self.retopo.surface_offset = settings.surface_offset;
+        self.retopo.uv_checker = settings.uv_checker;
         let t = settings.tools;
         self.tools.settings = ToolSettings {
             strip_width: t.strip_width,
@@ -170,31 +176,46 @@ impl AppState {
     }
 
     // ---- Commands --------------------------------------------------------------
+    //
+    // Dialogs answer asynchronously (see `modal`), so commands that ask
+    // something continue in a closure.
 
     /// Saves the project, asking for a file if there is none yet or `ask` is
-    /// set. Returns whether it was saved.
-    pub(crate) fn save_project(&mut self, ask: bool) -> bool {
-        let path = match (&self.project_path, ask) {
-            (Some(path), false) => path.clone(),
-            _ => {
-                let default_name = self
-                    .project_path
-                    .as_deref()
-                    .or(self.reference_path.as_deref())
-                    .and_then(|p| p.file_stem())
-                    .map_or("untitled".to_owned(), |s| s.to_string_lossy().into_owned());
-                let picked = rfd::FileDialog::new()
+    /// set, then runs `then` if it was saved.
+    pub(crate) fn save_project(&mut self, ask: bool, then: impl FnOnce(&mut Self) + 'static) {
+        if let (Some(path), false) = (&self.project_path, ask) {
+            if self.save_project_to(path.clone()) {
+                then(self);
+            }
+            return;
+        }
+        let default_name = self
+            .project_path
+            .as_deref()
+            .or(self.reference_path.as_deref())
+            .and_then(|p| p.file_stem())
+            .map_or("untitled".to_owned(), |s| s.to_string_lossy().into_owned());
+        self.ask(
+            move |parent| {
+                rfd::FileDialog::new()
                     .set_title("Save project")
                     .add_filter("Polyflow project", &[project::EXTENSION])
                     .set_file_name(format!("{default_name}.{}", project::EXTENSION))
-                    .set_parent(self.window.as_ref())
-                    .save_file();
-                match picked {
-                    Some(path) => path.with_extension(project::EXTENSION),
-                    None => return false,
+                    .set_parent(parent)
+                    .save_file()
+            },
+            move |state, picked| {
+                if let Some(path) = picked
+                    && state.save_project_to(path.with_extension(project::EXTENSION))
+                {
+                    then(state);
                 }
-            }
-        };
+            },
+        );
+    }
+
+    /// Writes the project to `path`. Returns whether it was saved.
+    fn save_project_to(&mut self, path: PathBuf) -> bool {
         let settings = self.project_settings(&path);
         match project::save(&path, &settings, self.retopo.mesh()) {
             Ok(()) => {
@@ -214,19 +235,22 @@ impl AppState {
     }
 
     pub(crate) fn open_project_dialog(&mut self) {
-        if self.has_unsaved_changes()
-            && !self.confirm_discard("Opening a project replaces the current work.")
-        {
-            return;
-        }
-        let picked = rfd::FileDialog::new()
-            .set_title("Open project")
-            .add_filter("Polyflow project", &[project::EXTENSION])
-            .set_parent(self.window.as_ref())
-            .pick_file();
-        if let Some(path) = picked {
-            self.open_project(&path, false);
-        }
+        self.confirm_discard("Opening a project replaces the current work.", |state| {
+            state.ask(
+                |parent| {
+                    rfd::FileDialog::new()
+                        .set_title("Open project")
+                        .add_filter("Polyflow project", &[project::EXTENSION])
+                        .set_parent(parent)
+                        .pick_file()
+                },
+                |state, picked| {
+                    if let Some(path) = picked {
+                        state.open_project(&path, false);
+                    }
+                },
+            );
+        });
     }
 
     /// Opens a project. A `recovered` autosave opens as unsaved, untitled work.
@@ -255,108 +279,176 @@ impl AppState {
             skipped => format!("Opened with {skipped} invalid retopology faces skipped"),
         });
 
+        let camera = project.settings.camera;
         let Some(reference) = project.settings.reference else {
             // No sculpt recorded: keep whatever is loaded.
             self.saved_reference = self.reference_path.clone();
-            if let Some(camera) = &project.settings.camera {
+            if let Some(camera) = &camera {
                 self.apply_camera(camera);
             }
             return;
         };
-        let found = reference
-            .resolve(path)
-            .or_else(|| self.locate_reference(&reference));
+        let recorded = reference.resolve(path);
         // The project points at the recorded sculpt; a relocated one is a change to save.
-        self.saved_reference = if recovered {
-            None
-        } else {
-            reference.resolve(path)
-        };
-        match found {
+        self.saved_reference = if recovered { None } else { recorded.clone() };
+        let name = reference.file_name().unwrap_or_else(|| "the sculpt".into());
+        match recorded {
+            Some(mesh) => self.use_project_reference(Some(mesh), &name, camera),
+            None => self.locate_reference(name, camera),
+        }
+    }
+
+    /// Asks the user to find a reference mesh that moved, then loads it.
+    fn locate_reference(&mut self, name: String, camera: Option<CameraState>) {
+        let description = format!("The project's sculpt, {name}, was not found. Locate it?");
+        self.ask(
+            move |parent| {
+                rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Warning)
+                    .set_title("Sculpt not found")
+                    .set_description(description)
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .set_parent(parent)
+                    .show()
+            },
+            move |state, answer| {
+                if answer != rfd::MessageDialogResult::Yes {
+                    state.use_project_reference(None, &name, camera);
+                    return;
+                }
+                let title = format!("Locate {name}");
+                state.ask(
+                    move |parent| {
+                        rfd::FileDialog::new()
+                            .set_title(title)
+                            .add_filter("Meshes", &["obj"])
+                            .set_parent(parent)
+                            .pick_file()
+                    },
+                    move |state, picked| state.use_project_reference(picked, &name, camera),
+                );
+            },
+        );
+    }
+
+    /// Shows the project's sculpt (`None` if it could not be found) with the
+    /// project's camera.
+    fn use_project_reference(
+        &mut self,
+        mesh: Option<PathBuf>,
+        name: &str,
+        camera: Option<CameraState>,
+    ) {
+        match mesh {
             Some(mesh) if Some(&mesh) == self.reference_path.as_ref() => {
-                if let Some(camera) = &project.settings.camera {
+                if let Some(camera) = &camera {
                     self.apply_camera(camera);
                 }
             }
             Some(mesh) => {
-                self.pending_camera = project.settings.camera;
+                self.pending_camera = camera;
                 self.start_job(Job::Open(mesh));
             }
             None => {
                 self.ui.error = Some(format!(
-                    "The sculpt {} was not found; the retopology is shown without it.",
-                    reference.file_name().unwrap_or_default()
+                    "The sculpt {name} was not found; the retopology is shown without it."
                 ));
-                if let Some(camera) = &project.settings.camera {
+                if let Some(camera) = &camera {
                     self.apply_camera(camera);
                 }
             }
         }
     }
 
-    /// Asks the user to find a reference mesh that moved.
-    fn locate_reference(&self, reference: &ReferencePath) -> Option<PathBuf> {
-        let name = reference.file_name().unwrap_or_else(|| "the sculpt".into());
-        let answer = rfd::MessageDialog::new()
-            .set_level(rfd::MessageLevel::Warning)
-            .set_title("Sculpt not found")
-            .set_description(format!(
-                "The project's sculpt, {name}, was not found. Locate it?"
-            ))
-            .set_buttons(rfd::MessageButtons::YesNo)
-            .set_parent(self.window.as_ref())
-            .show();
-        if answer != rfd::MessageDialogResult::Yes {
-            return None;
-        }
-        rfd::FileDialog::new()
-            .set_title(format!("Locate {name}"))
-            .add_filter("Meshes", &["obj"])
-            .set_parent(self.window.as_ref())
-            .pick_file()
-    }
-
     pub(crate) fn new_project(&mut self) {
-        if self.has_unsaved_changes()
-            && !self.confirm_discard("Starting a new project replaces the current work.")
-        {
-            return;
-        }
-        self.retopo.replace_mesh(HalfEdgeMesh::new());
-        self.tools.reset();
-        self.project_path = None;
-        self.saved_version = self.retopo.mesh().version();
-        self.saved_reference = self.reference_path.clone();
-        self.tools.status = Some("New project".into());
+        self.confirm_discard(
+            "Starting a new project replaces the current work.",
+            |state| {
+                state.retopo.replace_mesh(HalfEdgeMesh::new());
+                state.tools.reset();
+                state.project_path = None;
+                state.saved_version = state.retopo.mesh().version();
+                state.saved_reference = state.reference_path.clone();
+                state.tools.status = Some("New project".into());
+            },
+        );
     }
 
     pub(crate) fn import_retopo(&mut self) {
-        if !self.retopo.mesh().is_empty()
-            && self.has_unsaved_changes()
-            && !self.confirm_discard("Importing replaces the current retopology.")
-        {
+        let pick = |state: &mut Self| {
+            state.ask(
+                |parent| {
+                    rfd::FileDialog::new()
+                        .set_title("Import retopology")
+                        .add_filter("OBJ", &["obj"])
+                        .set_parent(parent)
+                        .pick_file()
+                },
+                |state, picked| {
+                    if let Some(path) = picked {
+                        state.load_retopo(path);
+                    }
+                },
+            );
+        };
+        // An empty retopology has nothing to lose.
+        if self.retopo.mesh().is_empty() {
+            pick(self);
+        } else {
+            self.confirm_discard("Importing replaces the current retopology.", pick);
+        }
+    }
+
+    fn load_retopo(&mut self, path: PathBuf) {
+        let imported = match polyflow_io::retopo::load(&path) {
+            Ok(imported) => imported,
+            Err(e) => {
+                self.ui.error = Some(format!("Could not import {}: {e}", path.display()));
+                return;
+            }
+        };
+        let faces = imported.mesh.face_count();
+        if faces <= SCULPT_FACES {
+            self.use_imported_retopo(imported);
             return;
         }
-        let picked = rfd::FileDialog::new()
-            .set_title("Import retopology")
-            .add_filter("OBJ", &["obj"])
-            .set_parent(self.window.as_ref())
-            .pick_file();
-        let Some(path) = picked else { return };
-        match polyflow_io::retopo::load(&path) {
-            Ok(imported) => {
-                let faces = imported.mesh.face_count();
-                self.retopo.replace_mesh(imported.mesh);
-                self.tools.reset();
-                // Imported geometry is not saved in the project yet.
-                self.saved_version = u64::MAX;
-                self.tools.status = Some(match imported.skipped_faces {
-                    0 => format!("Imported {faces} faces"),
-                    skipped => format!("Imported {faces} faces; skipped {skipped} invalid ones"),
-                });
-            }
-            Err(e) => self.ui.error = Some(format!("Could not import {}: {e}", path.display())),
-        }
+        let description = format!(
+            "{} has {faces} faces: it looks like a sculpt, not a retopology. \
+             Load it as the reference mesh instead?",
+            jobs::display_name(&path)
+        );
+        self.ask(
+            move |parent| {
+                rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Warning)
+                    .set_title("Import retopology")
+                    .set_description(description)
+                    .set_buttons(rfd::MessageButtons::YesNoCancel)
+                    .set_parent(parent)
+                    .show()
+            },
+            move |state, answer| match answer {
+                rfd::MessageDialogResult::Yes => state.start_job(Job::Open(path)),
+                rfd::MessageDialogResult::No => state.use_imported_retopo(imported),
+                _ => {}
+            },
+        );
+    }
+
+    fn use_imported_retopo(&mut self, imported: ImportedRetopo) {
+        let faces = imported.mesh.face_count();
+        let has_uvs = imported.mesh.has_uvs();
+        self.retopo.replace_mesh(imported.mesh);
+        // Show freshly imported UVs; keep the user's choice otherwise.
+        self.retopo.uv_checker |= has_uvs;
+        self.tools.reset();
+        // Imported geometry is not saved in the project yet.
+        self.saved_version = u64::MAX;
+        let uvs = if has_uvs { " with UVs" } else { "" };
+        self.tools.status = Some(match imported.skipped_faces {
+            0 => format!("Imported {faces} faces{uvs}"),
+            skipped => format!("Imported {faces} faces{uvs}; skipped {skipped} invalid ones"),
+        });
     }
 
     pub(crate) fn export_retopo(&mut self) {
@@ -365,38 +457,60 @@ impl AppState {
             .as_deref()
             .and_then(|p| p.file_stem())
             .map_or("retopo".to_owned(), |s| s.to_string_lossy().into_owned());
-        let picked = rfd::FileDialog::new()
-            .set_title("Export retopology")
-            .add_filter("OBJ", &["obj"])
-            .set_file_name(format!("{default_name}.obj"))
-            .set_parent(self.window.as_ref())
-            .save_file();
-        let Some(path) = picked else { return };
-        match polyflow_io::retopo::save(&path, self.retopo.mesh()) {
-            Ok(()) => self.tools.status = Some(format!("Exported {}", jobs::display_name(&path))),
-            Err(e) => self.ui.error = Some(format!("Could not export {}: {e}", path.display())),
-        }
+        self.ask(
+            move |parent| {
+                rfd::FileDialog::new()
+                    .set_title("Export retopology")
+                    .add_filter("OBJ", &["obj"])
+                    .set_file_name(format!("{default_name}.obj"))
+                    .set_parent(parent)
+                    .save_file()
+            },
+            |state, picked| {
+                let Some(path) = picked else { return };
+                match polyflow_io::retopo::save(&path, state.retopo.mesh()) {
+                    Ok(()) => {
+                        state.tools.status = Some(format!("Exported {}", jobs::display_name(&path)))
+                    }
+                    Err(e) => {
+                        state.ui.error = Some(format!("Could not export {}: {e}", path.display()))
+                    }
+                }
+            },
+        );
     }
 
-    /// Asks before throwing away unsaved work. True to go ahead.
-    pub(crate) fn confirm_discard(&mut self, what: &str) -> bool {
-        let answer = rfd::MessageDialog::new()
-            .set_level(rfd::MessageLevel::Warning)
-            .set_title("Unsaved changes")
-            .set_description(format!("{what} Save the project first?"))
-            .set_buttons(rfd::MessageButtons::YesNoCancel)
-            .set_parent(self.window.as_ref())
-            .show();
-        match answer {
-            rfd::MessageDialogResult::Yes => self.save_project(false),
-            rfd::MessageDialogResult::No => true,
-            _ => false,
+    /// Runs `then` once unsaved work may be thrown away: right away if there
+    /// is none, otherwise after asking (and saving, if the user wants to).
+    pub(crate) fn confirm_discard(&mut self, what: &str, then: impl FnOnce(&mut Self) + 'static) {
+        if !self.has_unsaved_changes() {
+            then(self);
+            return;
         }
+        let description = format!("{what} Save the project first?");
+        self.ask(
+            move |parent| {
+                rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Warning)
+                    .set_title("Unsaved changes")
+                    .set_description(description)
+                    .set_buttons(rfd::MessageButtons::YesNoCancel)
+                    .set_parent(parent)
+                    .show()
+            },
+            move |state, answer| match answer {
+                rfd::MessageDialogResult::Yes => state.save_project(false, then),
+                rfd::MessageDialogResult::No => then(state),
+                _ => {}
+            },
+        );
     }
 
-    /// True if the app may close (nothing unsaved, or the user decided).
-    pub(crate) fn confirm_close(&mut self) -> bool {
-        !self.has_unsaved_changes() || self.confirm_discard("The project has unsaved changes.")
+    /// Closes the app, asking first if there is unsaved work.
+    pub(crate) fn request_close(&mut self) {
+        self.confirm_discard("The project has unsaved changes.", |state| {
+            state.exit_requested = true;
+        });
     }
 
     pub(crate) fn update_title(&mut self) {
@@ -465,31 +579,41 @@ impl AppState {
 
     /// Offers to restore work autosaved by a session that did not close
     /// cleanly. Returns true if it was restored.
-    pub(crate) fn offer_recovery(&mut self) -> bool {
+    /// Offers to recover work autosaved by a session that did not close
+    /// properly; runs `otherwise` if there is none or the user declines.
+    pub(crate) fn offer_recovery(&mut self, otherwise: impl FnOnce(&mut Self) + 'static) {
         let stale = stale_autosaves();
         let Some((newest, modified)) = stale.first().cloned() else {
-            return false;
+            otherwise(self);
+            return;
         };
-        let answer = rfd::MessageDialog::new()
-            .set_level(rfd::MessageLevel::Info)
-            .set_title("Recover unsaved work")
-            .set_description(format!(
-                "Polyflow did not close properly last time. Recover the work autosaved {}?",
-                describe_age(modified)
-            ))
-            .set_buttons(rfd::MessageButtons::YesNo)
-            .set_parent(self.window.as_ref())
-            .show();
-        let recovered = answer == rfd::MessageDialogResult::Yes;
-        if recovered {
-            self.open_project(&newest, true);
-        }
-        // Either way the old files are no longer needed: recovered work is
-        // autosaved again under this session.
-        for (path, _) in stale {
-            let _ = std::fs::remove_file(path);
-        }
-        recovered
+        let description = format!(
+            "Polyflow did not close properly last time. Recover the work autosaved {}?",
+            describe_age(modified)
+        );
+        self.ask(
+            move |parent| {
+                rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Info)
+                    .set_title("Recover unsaved work")
+                    .set_description(description)
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .set_parent(parent)
+                    .show()
+            },
+            move |state, answer| {
+                if answer == rfd::MessageDialogResult::Yes {
+                    state.open_project(&newest, true);
+                } else {
+                    otherwise(state);
+                }
+                // Either way the old files are no longer needed: recovered
+                // work is autosaved again under this session.
+                for (path, _) in stale {
+                    let _ = std::fs::remove_file(path);
+                }
+            },
+        );
     }
 }
 

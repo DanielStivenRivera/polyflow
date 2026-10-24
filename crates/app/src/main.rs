@@ -7,6 +7,7 @@
 mod bench;
 mod camera_control;
 mod jobs;
+mod modal;
 mod options;
 mod project;
 mod retopo;
@@ -68,6 +69,7 @@ macro_rules! tool_input {
 #[derive(Debug)]
 enum UserEvent {
     MeshReady(Box<Result<Prepared, String>>),
+    DialogAnswer(modal::Answer),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -120,15 +122,18 @@ impl ApplicationHandler<UserEvent> for App {
         let options = self.options.take().unwrap_or_default();
         match AppState::new(event_loop, self.proxy.clone(), &options) {
             Ok(mut state) => {
-                let recovered = state.autosave.enabled && state.offer_recovery();
-                if !recovered {
-                    match options.mesh {
-                        Some(path) if is_project(&path) => state.open_project(&path, false),
-                        Some(path) => state.start_job(Job::Open(path)),
-                        None => state.start_job(Job::Torus {
-                            rings: state.ui.torus_rings,
-                        }),
-                    }
+                let mesh = options.mesh;
+                let start = move |state: &mut AppState| match mesh {
+                    Some(path) if is_project(&path) => state.open_project(&path, false),
+                    Some(path) => state.start_job(Job::Open(path)),
+                    None => state.start_job(Job::Torus {
+                        rings: state.ui.torus_rings,
+                    }),
+                };
+                if state.autosave.enabled {
+                    state.offer_recovery(start);
+                } else {
+                    start(&mut state);
                 }
                 self.state = Some(state);
             }
@@ -146,6 +151,10 @@ impl ApplicationHandler<UserEvent> for App {
         let Some(state) = &mut self.state else { return };
         let result = match event {
             UserEvent::MeshReady(result) => state.mesh_ready(*result),
+            UserEvent::DialogAnswer(answer) => {
+                state.dialog_answered(answer);
+                Ok(())
+            }
         };
         self.handle(event_loop, result);
     }
@@ -163,6 +172,10 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let Some(state) = &mut self.state else { return };
+        if state.exit_requested {
+            event_loop.exit();
+            return;
+        }
         let autosave_at = state.autosave_if_due();
         let repaint_at = match state.next_repaint {
             Some(at) if at <= Instant::now() => {
@@ -223,6 +236,10 @@ struct AppState {
     /// Camera to restore once the project's reference mesh has loaded.
     pending_camera: Option<polyflow_io::project::CameraState>,
     autosave: Autosave,
+    /// The dialog being shown, if any.
+    dialogs: modal::Dialogs,
+    /// Set once the user agreed to close; the event loop exits next.
+    exit_requested: bool,
     /// Title currently shown, to avoid resetting it every frame.
     title: String,
 }
@@ -293,6 +310,8 @@ impl AppState {
             saved_reference: None,
             pending_camera: None,
             autosave: Autosave::new(options.bench.is_none()),
+            dialogs: modal::Dialogs::default(),
+            exit_requested: false,
             title: String::new(),
             ui,
         };
@@ -304,6 +323,10 @@ impl AppState {
         event_loop: &ActiveEventLoop,
         event: WindowEvent,
     ) -> anyhow::Result<()> {
+        // A dialog is modal: the window keeps drawing but takes no input.
+        if self.dialogs.is_open() && modal::is_blocked_input(&event) {
+            return Ok(());
+        }
         let response = self.egui_state.on_window_event(&self.window, &event);
         if response.repaint {
             self.window.request_redraw();
@@ -311,26 +334,21 @@ impl AppState {
         let viewport_height = self.viewport.height;
 
         match event {
-            WindowEvent::CloseRequested => {
-                if self.confirm_close() {
-                    event_loop.exit();
-                }
-            }
+            WindowEvent::CloseRequested => self.request_close(),
             WindowEvent::Resized(size) => {
                 self.renderer.resize(size.width, size.height);
                 self.window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
                 let actions = self.redraw()?;
-                self.apply_post_frame_actions(event_loop, &actions);
+                self.apply_post_frame_actions(&actions);
                 self.update_title();
             }
             WindowEvent::DroppedFile(path) if is_project(&path) => {
-                if !self.has_unsaved_changes()
-                    || self.confirm_discard("Opening a project replaces the current work.")
-                {
-                    self.open_project(&path, false);
-                }
+                self.confirm_discard(
+                    "Opening a project replaces the current work.",
+                    move |state| state.open_project(&path, false),
+                );
             }
             WindowEvent::DroppedFile(path) => self.start_job(Job::Open(path)),
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -432,7 +450,7 @@ impl AppState {
             Some("i") if ctrl => self.import_retopo(),
             Some("e") if ctrl => self.export_retopo(),
             Some("s") if ctrl => {
-                self.save_project(mods.shift_key());
+                self.save_project(mods.shift_key(), |_| {});
             }
             Some("f") if !ctrl => self.frame_mesh(),
             Some("q") if !ctrl => self.tools.select(ToolKind::Create),
@@ -565,15 +583,21 @@ impl AppState {
     }
 
     fn open_file_dialog(&mut self) {
-        let picked = rfd::FileDialog::new()
-            .set_title("Open reference mesh")
-            .add_filter("Meshes", &["obj"])
-            .add_filter("All files", &["*"])
-            .set_parent(self.window.as_ref())
-            .pick_file();
-        if let Some(path) = picked {
-            self.start_job(Job::Open(path));
-        }
+        self.ask(
+            |parent| {
+                rfd::FileDialog::new()
+                    .set_title("Open reference mesh")
+                    .add_filter("Meshes", &["obj"])
+                    .add_filter("All files", &["*"])
+                    .set_parent(parent)
+                    .pick_file()
+            },
+            |state, picked| {
+                if let Some(path) = picked {
+                    state.start_job(Job::Open(path));
+                }
+            },
+        );
     }
 
     /// Raycasts the reference mesh under the cursor.
@@ -645,19 +669,21 @@ impl AppState {
             },
             cursor_in_viewport,
         };
-        let face_kinds = self.retopo.face_kinds();
+        let retopo_stats = self.retopo.stats();
         let mut retopo_ui = RetopoUi {
             tool: &mut self.tools.active,
             settings: &mut self.tools.settings,
             symmetry: &mut self.retopo.symmetry_axis,
             x_ray: &mut self.retopo.x_ray,
             surface_offset: &mut self.retopo.surface_offset,
+            uv_checker: &mut self.retopo.uv_checker,
             status: &mut self.tools.status,
             undo_name: self.retopo.doc.undo_name(),
             redo_name: self.retopo.doc.redo_name(),
             vertices: self.retopo.doc.mesh().vertex_count(),
             faces: self.retopo.doc.mesh().face_count(),
-            face_kinds,
+            face_kinds: retopo_stats.face_kinds,
+            uv_faces: retopo_stats.uv_faces,
         };
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut actions = Actions::default();
@@ -776,11 +802,9 @@ impl AppState {
         }
     }
 
-    fn apply_post_frame_actions(&mut self, event_loop: &ActiveEventLoop, actions: &Actions) {
+    fn apply_post_frame_actions(&mut self, actions: &Actions) {
         if actions.quit {
-            if self.confirm_close() {
-                event_loop.exit();
-            }
+            self.request_close();
         } else if actions.open_file {
             self.open_file_dialog();
         } else if actions.new_project {
@@ -788,7 +812,7 @@ impl AppState {
         } else if actions.open_project {
             self.open_project_dialog();
         } else if actions.save_project || actions.save_project_as {
-            self.save_project(actions.save_project_as);
+            self.save_project(actions.save_project_as, |_| {});
         } else if actions.import_retopo {
             self.import_retopo();
         } else if actions.export_retopo {

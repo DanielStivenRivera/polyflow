@@ -383,6 +383,69 @@ fn closing_a_fan_shared_with_other_fans_is_refused() {
 /// Timing for a large retopology mesh; run with
 /// `cargo test --release -p polyflow-core large_mesh_timing -- --ignored --nocapture`.
 #[test]
+fn uvs_belong_to_face_corners() {
+    use glam::Vec2;
+    let (mesh, cells) = grid(2);
+    let mut doc = MeshDocument::new(mesh);
+    let mut faces = Vec::new();
+    for cell in &cells {
+        faces.push(doc.edit("Add face", |m| m.add_face(cell)).unwrap());
+    }
+    assert!(!doc.mesh().has_uvs());
+    assert_eq!(doc.mesh().face_uvs(faces[0]), None);
+
+    // A seam: the shared vertex gets different UVs in each face.
+    let corners = [
+        Vec2::new(0.0, 0.0),
+        Vec2::new(0.5, 0.0),
+        Vec2::new(0.5, 0.5),
+        Vec2::new(0.0, 0.5),
+    ];
+    let shifted = corners.map(|uv| uv + Vec2::new(0.6, 0.0));
+    doc.edit("UVs", |m| {
+        m.set_face_uvs(faces[0], &corners);
+        m.set_face_uvs(faces[1], &shifted);
+        Ok::<_, TopologyError>(())
+    })
+    .unwrap();
+    let mesh = doc.mesh();
+    mesh.validate().unwrap();
+    assert!(mesh.has_uvs());
+    assert_eq!(mesh.face_uvs(faces[0]).unwrap(), corners);
+    assert_eq!(mesh.face_uvs(faces[1]).unwrap(), shifted);
+    assert_eq!(mesh.face_uvs(faces[2]), None, "untouched faces have no UVs");
+    // Boundary half-edges have no corner, so setting a UV there does nothing.
+    let boundary = mesh
+        .halfedges()
+        .find(|&h| mesh.is_boundary_halfedge(h))
+        .unwrap();
+    doc.edit("Boundary UV", |m| {
+        m.set_uv(boundary, Some(Vec2::ONE));
+        Ok::<_, TopologyError>(())
+    })
+    .unwrap();
+    assert_eq!(doc.mesh().uv(boundary), None);
+
+    // Removing a face drops its corners' UVs, and undo brings them back.
+    doc.edit("Remove", |m| m.remove_face(faces[0], false))
+        .unwrap();
+    doc.mesh().validate().unwrap();
+    doc.undo();
+    assert_eq!(doc.mesh().face_uvs(faces[0]).unwrap(), corners);
+    doc.undo();
+    assert!(!doc.mesh().has_uvs());
+    doc.redo();
+    assert_eq!(doc.mesh().face_uvs(faces[1]).unwrap(), shifted);
+    doc.edit("Clear", |m| {
+        m.clear_uvs();
+        Ok::<_, TopologyError>(())
+    })
+    .unwrap();
+    assert!(!doc.mesh().has_uvs());
+    doc.mesh().validate().unwrap();
+}
+
+#[test]
 #[ignore]
 fn large_mesh_timing() {
     use std::time::Instant;

@@ -115,6 +115,7 @@ pub struct RetopoUi<'a> {
     pub symmetry: &'a mut Option<Axis>,
     pub x_ray: &'a mut bool,
     pub surface_offset: &'a mut f32,
+    pub uv_checker: &'a mut bool,
     pub status: &'a mut Option<String>,
     pub undo_name: Option<&'a str>,
     pub redo_name: Option<&'a str>,
@@ -122,6 +123,8 @@ pub struct RetopoUi<'a> {
     pub faces: usize,
     /// Triangles, quads and other polygons.
     pub face_kinds: [usize; 3],
+    /// Faces with UVs on every corner.
+    pub uv_faces: usize,
 }
 
 #[derive(Debug)]
@@ -496,6 +499,10 @@ fn retopo_panel(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Acti
             *retopo.surface_offset = percent / 100.0;
         }
     });
+    ui.checkbox(retopo.uv_checker, "UV checker").on_hover_text(
+        "Shade faces with a checker from their UVs (red along U, green along V). \
+         Faces without UVs show in magenta: they will not bake.",
+    );
     ui.horizontal(|ui| {
         if ui
             .add_enabled(retopo.undo_name.is_some(), egui::Button::new("Undo"))
@@ -532,6 +539,16 @@ fn retopo_panel(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Acti
                     ngons
                 ),
             );
+            let uvs = match retopo.uv_faces {
+                0 => "None".to_owned(),
+                n if n == retopo.faces => "All faces".to_owned(),
+                n => format!(
+                    "{} of {} faces",
+                    group_thousands(n),
+                    group_thousands(retopo.faces)
+                ),
+            };
+            row(ui, "UVs", &uvs);
         });
     if retopo.vertices > 0 && ui.small_button("Clear retopology").clicked() {
         actions.clear_retopo = true;

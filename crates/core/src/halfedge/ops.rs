@@ -248,6 +248,7 @@ impl HalfEdgeMesh {
                 next: h0,
                 prev: h0,
                 face: None,
+                uv: None,
             }),
         );
         self.set_halfedge(
@@ -257,6 +258,7 @@ impl HalfEdgeMesh {
                 next: h1,
                 prev: h1,
                 face: None,
+                uv: None,
             }),
         );
         h0

@@ -4,6 +4,28 @@ All notable changes to Polyflow are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- UVs on the retopology, per face corner (seams need no split vertices).
+  Imported from OBJ (`vt`), written back on export and kept in project
+  files. Edits and undo keep them; faces built with the retopology tools
+  have none.
+- **UV checker** view: faces are shaded with a checker from their UVs, tinted
+  red along U and green along V; faces without UVs show in magenta. Turned on
+  automatically when an imported retopology has UVs. The panel shows how many
+  faces have UVs.
+- Importing a mesh of more than 500,000 faces as retopology offers to load it
+  as the reference mesh instead.
+
+### Fixed
+
+- Windows: dialogs (unsaved changes on close, recovery, file pickers) could
+  take seconds to appear or hang the app, with one CPU core at 100%. They now
+  open on their own thread and show at once; the window keeps drawing and
+  ignores input while one is open.
+
 ## [0.1.1] - 2026-10-19
 
 ### Added

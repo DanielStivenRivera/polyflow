@@ -53,6 +53,10 @@ impl HalfEdgeMesh {
                 )?;
             }
             check(
+                he.face.is_some() || he.uv.is_none(),
+                format!("{h:?}: boundary half-edge has a UV"),
+            )?;
+            check(
                 he.face.is_some() || self.face_of(h.twin()).is_some(),
                 format!("{h:?}: loose edge (no face on either side)"),
             )?;

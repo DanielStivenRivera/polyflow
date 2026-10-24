@@ -170,6 +170,29 @@ Profiling uses Tracy (CPU + GPU zones).
 6. Create, strips, relax and symmetry tools.
 7. OBJ export, first public release.
 
+### v0.2 milestones
+
+UVs are unwrapped in a DCC and imported; unwrapping inside Polyflow stays out
+of scope. A CPU baker comes first and is the reference the GPU baker is
+validated against.
+
+1. UVs on the retopology: per-corner UVs in the half-edge mesh, kept through
+   edits and undo; `vt` in OBJ import/export; UVs in `.pflow`; checker
+   preview in the viewport.
+2. Texture-space rasterization: triangulate the low-poly, per-texel position,
+   normal and tangent; tangent basis matching MikkTSpace exactly.
+3. CPU reference baker: tangent- and object-space normals and AO with
+   ray-distance projection, on the CPU BVH with `rayon`; golden-image tests.
+4. Cage: automatic (low-poly pushed along averaged normals, adjustable) or
+   imported from OBJ; shown in the viewport.
+5. Map export: PNG 8/16-bit and EXR half/float, with edge padding (dilation)
+   and supersampling.
+6. GPU baker: Vulkan compute with `VK_KHR_ray_query`, compute BVH traversal
+   as fallback; matches the CPU reference within tolerance; hits the bake
+   budget.
+7. Bake panel with progress and cancel, map preview on the low-poly,
+   `polyflow-cli bake`, release v0.2.0.
+
 ## 9. Open questions
 
 - Pen tablet pressure input: `winit` support is limited; may need native

@@ -39,13 +39,53 @@ struct ColorOutput
 
 // ---- Triangles ------------------------------------------------------------
 
-[shader("vertex")]
-ColorOutput triangleVertex([[vk::location(0)]] float3 position : POSITION, [[vk::location(1)]] float4 color : COLOR)
+struct TriangleOutput
 {
-    ColorOutput output;
+    float4 position : SV_Position;
+    float4 color : COLOR;
+    float2 uv : TEXCOORD;
+    float checker : CHECKER;
+};
+
+[shader("vertex")]
+TriangleOutput triangleVertex(
+    [[vk::location(0)]] float3 position : POSITION,
+    [[vk::location(1)]] float4 color : COLOR,
+    [[vk::location(2)]] float2 uv : TEXCOORD,
+    [[vk::location(3)]] float checker : CHECKER)
+{
+    TriangleOutput output;
     output.position = project(position);
     output.color = linearColor(color);
+    output.uv = uv;
+    output.checker = checker;
     return output;
+}
+
+// Cells per UV unit of the checker.
+static const float CHECKER_CELLS = 8.0;
+
+// Box-filtered checker (0 or 1 per cell, blended where cells get smaller than
+// a pixel so it does not shimmer).
+float checkerPattern(float2 uv)
+{
+    float2 p = uv * CHECKER_CELLS;
+    float2 w = max(fwidth(p), 1e-4);
+    float2 i = 2.0 * (abs(frac((p - 0.5 * w) * 0.5) - 0.5) - abs(frac((p + 0.5 * w) * 0.5) - 0.5)) / w;
+    return 0.5 - 0.5 * i.x * i.y;
+}
+
+[shader("fragment")]
+float4 triangleFragment(TriangleOutput input) : SV_Target
+{
+    if (input.checker < 0.5)
+        return input.color;
+    // Gray cells, tinted red along U and green along V within each UV tile,
+    // so stretching, flips and rotations are easy to spot.
+    float2 f = frac(input.uv);
+    float3 tint = float3(0.55 + 0.45 * f.x, 0.55 + 0.45 * f.y, 0.75);
+    float shade = lerp(0.25, 0.85, checkerPattern(input.uv));
+    return float4(pow(tint * shade, 2.2), input.color.a);
 }
 
 [shader("fragment")]

@@ -20,13 +20,19 @@
 //!   at a corner while a patch is being built); they are chained through their
 //!   boundary gaps. Interior vertices have exactly one fan.
 //! - If a vertex is on a boundary, its `outgoing` half-edge is a boundary one.
+//! - Only half-edges with a face carry a UV.
+//!
+//! UVs are stored per face corner: the half-edge of a face holds the UV of its
+//! origin vertex in that face, so UV seams need no split vertices. They come
+//! from DCC tools (Polyflow does not unwrap); faces created by the retopology
+//! tools have none.
 
 mod ops;
 #[cfg(test)]
 mod tests;
 mod validate;
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
 pub use ops::TopologyError;
 
@@ -88,13 +94,15 @@ pub(crate) struct Vertex {
     pub outgoing: Option<HalfEdgeId>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct HalfEdge {
     pub origin: VertexId,
     pub next: HalfEdgeId,
     pub prev: HalfEdgeId,
     /// `None` on boundaries.
     pub face: Option<FaceId>,
+    /// UV of `origin` in `face`; always `None` on boundaries.
+    pub uv: Option<Vec2>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +233,27 @@ impl HalfEdgeMesh {
 
     pub fn face_halfedge(&self, f: FaceId) -> HalfEdgeId {
         self.face(f).halfedge
+    }
+
+    /// UV of the face corner at `h`'s origin, if it has one.
+    pub fn uv(&self, h: HalfEdgeId) -> Option<Vec2> {
+        self.he(h).uv
+    }
+
+    /// UVs of a face's corners, in [`Self::face_vertices`] order, if every
+    /// corner has one.
+    pub fn face_uvs(&self, f: FaceId) -> Option<Vec<Vec2>> {
+        self.face_halfedges(f).map(|h| self.uv(h)).collect()
+    }
+
+    /// True if every corner of the face has a UV.
+    pub fn face_has_uvs(&self, f: FaceId) -> bool {
+        self.face_halfedges(f).all(|h| self.he(h).uv.is_some())
+    }
+
+    /// True if any face corner has a UV.
+    pub fn has_uvs(&self) -> bool {
+        self.halfedges.iter().flatten().any(|h| h.uv.is_some())
     }
 
     pub fn is_boundary_halfedge(&self, h: HalfEdgeId) -> bool {
@@ -435,10 +464,45 @@ impl HalfEdgeMesh {
         self.set_vertex(v, Some(vertex));
     }
 
+    /// Sets the UV of the face corner at `h`'s origin. Ignored on boundary
+    /// half-edges, which have no corner.
+    pub fn set_uv(&mut self, h: HalfEdgeId, uv: Option<Vec2>) {
+        let he = *self.he(h);
+        if he.face.is_none() {
+            return;
+        }
+        self.set_halfedge(h, Some(HalfEdge { uv, ..he }));
+    }
+
+    /// Sets the UVs of a face's corners, in [`Self::face_vertices`] order.
+    /// Extra values are ignored; missing ones leave corners unchanged.
+    pub fn set_face_uvs(&mut self, f: FaceId, uvs: &[Vec2]) {
+        let start = self.face(f).halfedge;
+        let mut h = start;
+        for &uv in uvs {
+            self.set_uv(h, Some(uv));
+            h = self.next(h);
+            if h == start {
+                break;
+            }
+        }
+    }
+
+    /// Removes every UV.
+    pub fn clear_uvs(&mut self) {
+        let corners: Vec<HalfEdgeId> = self.halfedges().filter(|&h| self.uv(h).is_some()).collect();
+        for h in corners {
+            self.set_uv(h, None);
+        }
+    }
+
+    /// Changes `h`'s face. A corner that leaves its face loses its UV.
     pub(crate) fn set_face_of(&mut self, h: HalfEdgeId, face: Option<FaceId>) {
+        let old = *self.he(h);
         let value = HalfEdge {
             face,
-            ..*self.he(h)
+            uv: if face == old.face { old.uv } else { None },
+            ..old
         };
         self.set_halfedge(h, Some(value));
     }

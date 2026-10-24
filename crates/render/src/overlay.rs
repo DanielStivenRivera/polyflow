@@ -31,6 +31,32 @@ impl Rgba8 {
 pub struct OverlayVertex {
     pub position: Vec3,
     pub color: Rgba8,
+    pub uv: Vec2,
+    /// 1 to shade the triangle with a checker pattern from `uv` (tinted by
+    /// `color`'s alpha), 0 for a flat `color`.
+    pub checker: f32,
+}
+
+impl OverlayVertex {
+    /// A vertex of a flat-colored triangle.
+    pub fn flat(position: Vec3, color: Rgba8) -> Self {
+        Self {
+            position,
+            color,
+            uv: Vec2::ZERO,
+            checker: 0.0,
+        }
+    }
+
+    /// A vertex of a triangle shaded with a UV checker.
+    pub fn checker(position: Vec3, color: Rgba8, uv: Vec2) -> Self {
+        Self {
+            position,
+            color,
+            uv,
+            checker: 1.0,
+        }
+    }
 }
 
 #[repr(C)]
@@ -265,12 +291,22 @@ impl OverlayRenderer {
             };
             self.triangles = make(
                 c"triangleVertex",
-                c"colorFragment",
+                c"triangleFragment",
                 size_of::<OverlayVertex>(),
                 vk::VertexInputRate::VERTEX,
                 &[
                     attr(0, f32x3, std::mem::offset_of!(OverlayVertex, position)),
                     attr(1, rgba8, std::mem::offset_of!(OverlayVertex, color)),
+                    attr(
+                        2,
+                        vk::Format::R32G32_SFLOAT,
+                        std::mem::offset_of!(OverlayVertex, uv),
+                    ),
+                    attr(
+                        3,
+                        vk::Format::R32_SFLOAT,
+                        std::mem::offset_of!(OverlayVertex, checker),
+                    ),
                 ],
             )?;
             self.lines = make(
@@ -505,7 +541,7 @@ mod tests {
 
     #[test]
     fn layouts_match_shaders() {
-        assert_eq!(size_of::<OverlayVertex>(), 16);
+        assert_eq!(size_of::<OverlayVertex>(), 28);
         assert_eq!(size_of::<OverlayLine>(), 28);
         assert_eq!(size_of::<OverlayPoint>(), 20);
         assert_eq!(size_of::<OverlayPushConstants>(), 96);

@@ -15,6 +15,10 @@ use polyflow_render::{Overlay, OverlayLine, OverlayPoint, OverlayVertex, Rgba8};
 use self::symmetry::{Axis, Symmetry};
 
 pub const FACE_COLOR: Rgba8 = Rgba8::new(70, 140, 255, 55);
+/// Faces with UVs under the UV checker (only the alpha is used).
+pub const UV_FACE_COLOR: Rgba8 = Rgba8::new(255, 255, 255, 200);
+/// Faces without UVs while the UV checker is on.
+pub const NO_UV_FACE_COLOR: Rgba8 = Rgba8::new(255, 60, 200, 110);
 pub const EDGE_COLOR: Rgba8 = Rgba8::new(150, 200, 255, 255);
 pub const BOUNDARY_EDGE_COLOR: Rgba8 = Rgba8::new(255, 255, 255, 255);
 pub const VERTEX_COLOR: Rgba8 = Rgba8::new(225, 238, 255, 255);
@@ -34,11 +38,25 @@ pub struct Retopo {
     /// How far the retopo mesh is drawn in front of the surface, as a
     /// fraction of its distance to the camera.
     pub surface_offset: f32,
+    /// Shade faces with a checker from their UVs.
+    pub uv_checker: bool,
     /// Size of the reference mesh, which scales symmetry tolerances.
     pub scene_radius: f32,
     next_gesture: u64,
     mesh_overlay: Overlay,
-    mesh_overlay_version: Option<u64>,
+    /// Mesh version and UV checker state the overlay was built for.
+    mesh_overlay_key: Option<(u64, bool)>,
+    /// Stats and the mesh version they were counted for.
+    stats: Option<(u64, RetopoStats)>,
+}
+
+/// Face counts shown in the retopology panel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RetopoStats {
+    /// Triangles, quads and other polygons.
+    pub face_kinds: [usize; 3],
+    /// Faces with a UV on every corner.
+    pub uv_faces: usize,
 }
 
 impl Default for Retopo {
@@ -48,10 +66,12 @@ impl Default for Retopo {
             symmetry_axis: None,
             x_ray: false,
             surface_offset: 0.01,
+            uv_checker: false,
             scene_radius: 1.0,
             next_gesture: 0,
             mesh_overlay: Overlay::default(),
-            mesh_overlay_version: None,
+            mesh_overlay_key: None,
+            stats: None,
         }
     }
 }
@@ -64,7 +84,8 @@ impl Retopo {
     /// Replaces the mesh and its history (e.g. after importing a file).
     pub fn replace_mesh(&mut self, mesh: HalfEdgeMesh) {
         self.doc = MeshDocument::new(mesh);
-        self.mesh_overlay_version = None;
+        self.mesh_overlay_key = None;
+        self.stats = None;
     }
 
     pub fn symmetry(&self) -> Option<Symmetry> {
@@ -78,42 +99,61 @@ impl Retopo {
         self.next_gesture
     }
 
-    /// The mesh as overlay geometry, rebuilt only when the mesh changed.
+    /// The mesh as overlay geometry, rebuilt only when the mesh or the way
+    /// it is shown changed.
     pub fn mesh_overlay(&mut self) -> &Overlay {
-        let version = self.doc.mesh().version();
-        if self.mesh_overlay_version != Some(version) {
-            build_mesh_overlay(self.doc.mesh(), &mut self.mesh_overlay);
-            self.mesh_overlay_version = Some(version);
+        let key = (self.doc.mesh().version(), self.uv_checker);
+        if self.mesh_overlay_key != Some(key) {
+            build_mesh_overlay(self.doc.mesh(), self.uv_checker, &mut self.mesh_overlay);
+            self.mesh_overlay_key = Some(key);
         }
         &self.mesh_overlay
     }
 
-    /// Counts of faces by number of sides: triangles, quads, others.
-    pub fn face_kinds(&self) -> [usize; 3] {
+    /// Face counts, recounted only when the mesh changed (the panel asks
+    /// every frame, and a retopology can have millions of faces).
+    pub fn stats(&mut self) -> RetopoStats {
         let mesh = self.doc.mesh();
-        let mut kinds = [0; 3];
-        for f in mesh.faces() {
-            match mesh.face_halfedges(f).count() {
-                3 => kinds[0] += 1,
-                4 => kinds[1] += 1,
-                _ => kinds[2] += 1,
-            }
+        let version = mesh.version();
+        if let Some((counted, stats)) = self.stats
+            && counted == version
+        {
+            return stats;
         }
-        kinds
+        let mut stats = RetopoStats::default();
+        for f in mesh.faces() {
+            let (sides, uvs) = mesh.face_halfedges(f).fold((0, true), |(n, uvs), h| {
+                (n + 1, uvs && mesh.uv(h).is_some())
+            });
+            match sides {
+                3 => stats.face_kinds[0] += 1,
+                4 => stats.face_kinds[1] += 1,
+                _ => stats.face_kinds[2] += 1,
+            }
+            stats.uv_faces += uvs as usize;
+        }
+        self.stats = Some((version, stats));
+        stats
     }
 }
 
-fn build_mesh_overlay(mesh: &HalfEdgeMesh, out: &mut Overlay) {
+fn build_mesh_overlay(mesh: &HalfEdgeMesh, uv_checker: bool, out: &mut Overlay) {
     out.clear();
+    let mut corners: Vec<OverlayVertex> = Vec::new();
     for f in mesh.faces() {
-        let vertices: Vec<_> = mesh.face_vertices(f).map(|v| mesh.position(v)).collect();
-        for i in 1..vertices.len() - 1 {
-            for p in [vertices[0], vertices[i], vertices[i + 1]] {
-                out.triangles.push(OverlayVertex {
-                    position: p,
-                    color: FACE_COLOR,
-                });
+        let checker = uv_checker && mesh.face_has_uvs(f);
+        corners.clear();
+        corners.extend(mesh.face_halfedges(f).map(|h| {
+            let p = mesh.position(mesh.origin(h));
+            match mesh.uv(h) {
+                Some(uv) if checker => OverlayVertex::checker(p, UV_FACE_COLOR, uv),
+                _ if uv_checker => OverlayVertex::flat(p, NO_UV_FACE_COLOR),
+                _ => OverlayVertex::flat(p, FACE_COLOR),
             }
+        }));
+        for i in 1..corners.len() - 1 {
+            out.triangles
+                .extend_from_slice(&[corners[0], corners[i], corners[i + 1]]);
         }
     }
     for e in mesh.edges() {

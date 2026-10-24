@@ -3,7 +3,7 @@
 //! A project is a zip archive with two entries:
 //! - `project.json`: the format version, where the reference mesh is, and the
 //!   view and tool settings;
-//! - `retopo.obj`: the retopology mesh as polygon OBJ.
+//! - `retopo.obj`: the retopology mesh as polygon OBJ, with its UVs.
 //!
 //! The reference mesh is not embedded (sculpts can be gigabytes). Its path is
 //! stored both relative to the project and absolute, so a project keeps
@@ -147,6 +147,8 @@ pub struct ProjectSettings {
     pub symmetry: Option<Axis>,
     pub x_ray: bool,
     pub surface_offset: f32,
+    /// Show the retopology's UVs as a checker pattern.
+    pub uv_checker: bool,
     pub tools: ToolState,
 }
 
@@ -158,6 +160,7 @@ impl Default for ProjectSettings {
             symmetry: None,
             x_ray: false,
             surface_offset: 0.01,
+            uv_checker: false,
             tools: ToolState::default(),
         }
     }
@@ -284,7 +287,7 @@ fn relative_path(path: &Path, base: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use polyflow_core::glam::Vec3;
+    use polyflow_core::glam::{Vec2, Vec3};
 
     use super::*;
 
@@ -296,11 +299,14 @@ mod tests {
         dir
     }
 
+    const QUAD_UVS: [Vec2; 4] = [Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y];
+
     fn quad() -> HalfEdgeMesh {
         let mut mesh = HalfEdgeMesh::new();
         let v =
             [Vec3::ZERO, Vec3::X, Vec3::new(1.0, 1.0, 0.0), Vec3::Y].map(|p| mesh.add_vertex(p));
-        mesh.add_face(&v).unwrap();
+        let f = mesh.add_face(&v).unwrap();
+        mesh.set_face_uvs(f, &QUAD_UVS);
         mesh
     }
 
@@ -325,6 +331,7 @@ mod tests {
             symmetry: Some(Axis::X),
             x_ray: true,
             surface_offset: 0.02,
+            uv_checker: true,
             tools: ToolState {
                 strip_width: 55.0,
                 ..ToolState::default()
@@ -336,6 +343,8 @@ mod tests {
         let project = load(&project_path).unwrap();
         assert_eq!(project.settings, settings);
         assert_eq!(project.retopo.face_count(), 1);
+        let face = project.retopo.faces().next().unwrap();
+        assert_eq!(project.retopo.face_uvs(face).unwrap(), QUAD_UVS);
         assert_eq!(
             project
                 .settings

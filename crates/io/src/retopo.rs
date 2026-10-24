@@ -1,19 +1,24 @@
 //! Saving and loading retopology meshes as polygon OBJ files.
 //!
 //! Unlike reference meshes, retopology meshes keep their polygons (quads
-//! stay quads) and are small, so this parser is sequential.
+//! stay quads) and are small, so this parser is sequential. Per-corner UVs
+//! (`vt`) are kept; normals are ignored.
 
 use std::io::Write;
 use std::path::Path;
 
-use polyflow_core::glam::Vec3;
+use std::collections::HashMap;
+
+use polyflow_core::glam::{Vec2, Vec3};
 use polyflow_core::halfedge::{HalfEdgeMesh, VertexId};
 
 use crate::LoadError;
 use crate::obj::{Cursor, ObjError, parse_int};
 
-/// Writes the mesh as OBJ with its polygons. Vertex ids are renumbered
-/// densely, so gaps left by deleted vertices do not reach the file.
+/// Writes the mesh as OBJ with its polygons and UVs. Vertex ids are
+/// renumbered densely, so gaps left by deleted vertices do not reach the
+/// file. Identical UVs are written once; faces with a corner lacking a UV are
+/// written without any.
 pub fn write_obj(mesh: &HalfEdgeMesh, out: impl Write) -> std::io::Result<()> {
     let mut out = std::io::BufWriter::new(out);
     writeln!(
@@ -28,16 +33,39 @@ pub fn write_obj(mesh: &HalfEdgeMesh, out: impl Write) -> std::io::Result<()> {
         mesh.face_count()
     )?;
     writeln!(out, "o retopo")?;
-    let mut number = std::collections::HashMap::with_capacity(mesh.vertex_count());
+    let mut number = HashMap::with_capacity(mesh.vertex_count());
     for (i, v) in mesh.vertices().enumerate() {
         let p = mesh.position(v);
         writeln!(out, "v {} {} {}", p.x, p.y, p.z)?;
         number.insert(v, i + 1);
     }
-    for f in mesh.faces() {
+    let mut uv_number: HashMap<[u32; 2], usize> = HashMap::new();
+    let mut uv_values: Vec<Vec2> = Vec::new();
+    let face_uvs: Vec<Option<Vec<usize>>> = mesh
+        .faces()
+        .map(|f| {
+            let uvs = mesh.face_uvs(f)?;
+            let numbers = uvs.iter().map(|&uv| {
+                *uv_number
+                    .entry(uv.to_array().map(f32::to_bits))
+                    .or_insert_with(|| {
+                        uv_values.push(uv);
+                        uv_values.len()
+                    })
+            });
+            Some(numbers.collect())
+        })
+        .collect();
+    for uv in &uv_values {
+        writeln!(out, "vt {} {}", uv.x, uv.y)?;
+    }
+    for (f, uvs) in mesh.faces().zip(face_uvs) {
         write!(out, "f")?;
-        for v in mesh.face_vertices(f) {
-            write!(out, " {}", number[&v])?;
+        for (i, v) in mesh.face_vertices(f).enumerate() {
+            match &uvs {
+                Some(uvs) => write!(out, " {}/{}", number[&v], uvs[i])?,
+                None => write!(out, " {}", number[&v])?,
+            }
         }
         writeln!(out)?;
     }
@@ -82,7 +110,13 @@ pub fn load(path: &Path) -> Result<ImportedRetopo, LoadError> {
 pub fn parse_obj(bytes: &[u8]) -> Result<ImportedRetopo, ObjError> {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     let mut positions: Vec<Vec3> = Vec::new();
-    let mut faces: Vec<Vec<u32>> = Vec::new();
+    let mut uvs: Vec<Vec2> = Vec::new();
+    // Faces stored flat: corner vertex indices, the matching UV indices
+    // (`NO_UV` for faces without UVs), and where each face starts.
+    const NO_UV: u32 = u32::MAX;
+    let mut corners: Vec<u32> = Vec::new();
+    let mut corner_uvs: Vec<u32> = Vec::new();
+    let mut face_starts: Vec<usize> = Vec::new();
     let mut skipped_faces = 0;
 
     for (line_index, line) in bytes.split(|&b| b == b'\n').enumerate() {
@@ -102,54 +136,80 @@ pub fn parse_obj(bytes: &[u8]) -> Result<ImportedRetopo, ObjError> {
                 }
                 positions.push(Vec3::from_array(p));
             }
-            [b'f', b' ' | b'\t', rest @ ..] => {
+            [b'v', b't', b' ' | b'\t', rest @ ..] => {
                 let mut cursor = Cursor::new(rest);
-                let mut face = Vec::new();
+                let u = cursor
+                    .float()
+                    .ok_or_else(|| error("expected a number after `vt`".into()))?;
+                // `v` is optional in the spec and defaults to 0.
+                let v = cursor.float().unwrap_or(0.0);
+                uvs.push(Vec2::new(u, v));
+            }
+            [b'f', b' ' | b'\t', rest @ ..] => {
+                let start = corners.len();
+                let mut cursor = Cursor::new(rest);
+                let mut has_uvs = true;
                 while let Some(token) = cursor.token() {
-                    let position = token.split(|&b| b == b'/').next().unwrap_or_default();
-                    let index =
-                        parse_int(position).ok_or_else(|| error("invalid face index".into()))?;
-                    let resolved = match index {
-                        1.. => index - 1,
-                        ..0 => positions.len() as i64 + index,
-                        0 => {
-                            return Err(error(
-                                "face index 0 is invalid (OBJ indices start at 1)".into(),
-                            ));
-                        }
-                    };
-                    if resolved < 0 || resolved >= positions.len() as i64 {
-                        return Err(error(format!(
-                            "face index {index} refers to a vertex not defined yet"
-                        )));
-                    }
-                    face.push(resolved as u32);
+                    let mut parts = token.split(|&b| b == b'/');
+                    let position = parts.next().unwrap_or_default();
+                    corners.push(resolve(position, positions.len(), "vertex").map_err(error)?);
+                    // A bad UV reference loses the face's UVs, not the face.
+                    let uv = parts
+                        .next()
+                        .filter(|uv| !uv.is_empty())
+                        .and_then(|uv| resolve(uv, uvs.len(), "UV").ok());
+                    has_uvs &= uv.is_some();
+                    corner_uvs.push(uv.unwrap_or(NO_UV));
                 }
-                let mut unique = face.clone();
-                unique.sort_unstable();
-                unique.dedup();
-                if face.len() < 3 || unique.len() != face.len() {
+                if !has_uvs {
+                    corner_uvs[start..].fill(NO_UV);
+                }
+                let face = &corners[start..];
+                // Polygons are small: a quadratic check beats sorting a copy.
+                let repeated = face
+                    .iter()
+                    .enumerate()
+                    .any(|(i, v)| face[i + 1..].contains(v));
+                if face.len() < 3 || repeated {
                     skipped_faces += 1;
+                    corners.truncate(start);
+                    corner_uvs.truncate(start);
                 } else {
-                    faces.push(face);
+                    face_starts.push(start);
                 }
             }
             _ => {}
         }
     }
+    face_starts.push(corners.len());
 
     let mut mesh = HalfEdgeMesh::new();
     let ids: Vec<VertexId> = positions.iter().map(|&p| mesh.add_vertex(p)).collect();
+    let mut face_vertices: Vec<VertexId> = Vec::new();
+    let mut face_uvs: Vec<Vec2> = Vec::new();
+    let mut add = |mesh: &mut HalfEdgeMesh, k: usize| {
+        let range = face_starts[k]..face_starts[k + 1];
+        face_vertices.clear();
+        face_vertices.extend(corners[range.clone()].iter().map(|&i| ids[i as usize]));
+        let Ok(f) = mesh.add_face(&face_vertices) else {
+            return false;
+        };
+        if corner_uvs[range.start] != NO_UV {
+            face_uvs.clear();
+            face_uvs.extend(corner_uvs[range].iter().map(|&i| uvs[i as usize]));
+            mesh.set_face_uvs(f, &face_uvs);
+        }
+        true
+    };
     // Whether a face can be added may depend on the order: retry the ones
     // that failed until no more succeed.
-    let mut pending: Vec<Vec<VertexId>> = faces
-        .iter()
-        .map(|f| f.iter().map(|&i| ids[i as usize]).collect())
+    let mut pending: Vec<usize> = (0..face_starts.len() - 1)
+        .filter(|&k| !add(&mut mesh, k))
         .collect();
-    loop {
+    while !pending.is_empty() {
         let before = pending.len();
-        pending.retain(|face| mesh.add_face(face).is_err());
-        if pending.is_empty() || pending.len() == before {
+        pending.retain(|&k| !add(&mut mesh, k));
+        if pending.len() == before {
             break;
         }
     }
@@ -158,6 +218,27 @@ pub fn parse_obj(bytes: &[u8]) -> Result<ImportedRetopo, ObjError> {
         mesh,
         skipped_faces,
     })
+}
+
+/// Turns a 1-based (or negative, relative) OBJ index into a 0-based one
+/// below `len`.
+fn resolve(token: &[u8], len: usize, what: &str) -> Result<u32, String> {
+    let index = parse_int(token).ok_or_else(|| format!("invalid {what} index"))?;
+    let resolved = match index {
+        1.. => index - 1,
+        ..0 => len as i64 + index,
+        0 => {
+            return Err(format!(
+                "{what} index 0 is invalid (OBJ indices start at 1)"
+            ));
+        }
+    };
+    if resolved < 0 || resolved >= len as i64 {
+        return Err(format!(
+            "{what} index {index} refers to a {what} not defined yet"
+        ));
+    }
+    Ok(resolved as u32)
 }
 
 #[cfg(test)]
@@ -211,6 +292,74 @@ mod tests {
         a.sort_unstable();
         b.sort_unstable();
         assert_eq!(a, b, "positions survive exactly");
+    }
+
+    #[test]
+    fn uvs_round_trip_with_seams() {
+        let mut mesh = grid(2);
+        let faces: Vec<_> = mesh.faces().collect();
+        // Faces 0 and 1 share an edge but sit apart in UV space (a seam);
+        // the other faces have no UVs.
+        for (k, &f) in faces[..2].iter().enumerate() {
+            let offset = Vec2::new(k as f32 * 0.6, 0.1);
+            let uvs: Vec<Vec2> = [(0.0, 0.0), (0.5, 0.0), (0.5, 0.5), (0.0, 0.5)]
+                .iter()
+                .map(|&(u, v)| Vec2::new(u, v) + offset)
+                .collect();
+            mesh.set_face_uvs(f, &uvs);
+        }
+        let mut text = Vec::new();
+        write_obj(&mesh, &mut text).unwrap();
+        let written = String::from_utf8(text.clone()).unwrap();
+        assert_eq!(written.matches("\nvt ").count(), 8, "{written}");
+
+        let back = parse_obj(&text).unwrap().mesh;
+        back.validate().unwrap();
+        // Faces with UVs, keyed by their vertex positions.
+        let corners = |m: &HalfEdgeMesh| {
+            let mut out: Vec<Vec<([u32; 3], [u32; 2])>> = m
+                .faces()
+                .filter_map(|f| {
+                    let uvs = m.face_uvs(f)?;
+                    let mut corners: Vec<_> = m
+                        .face_vertices(f)
+                        .zip(uvs)
+                        .map(|(v, uv)| {
+                            (
+                                m.position(v).to_array().map(f32::to_bits),
+                                uv.to_array().map(f32::to_bits),
+                            )
+                        })
+                        .collect();
+                    corners.sort_unstable();
+                    Some(corners)
+                })
+                .collect();
+            out.sort_unstable();
+            out
+        };
+        assert_eq!(corners(&back).len(), 2);
+        assert_eq!(corners(&back), corners(&mesh));
+    }
+
+    #[test]
+    fn uv_indices_are_parsed_leniently() {
+        let text = "v 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nvt 0 0\nvt 1 0\nvt 0.25\n\
+                    f 1/1/1 2/2/1 3/-1/1\nf 2/2 4/9 3/3\n";
+        let mesh = parse_obj(text.as_bytes()).unwrap().mesh;
+        let mut faces = mesh.faces();
+        let first = faces.next().unwrap();
+        assert_eq!(
+            mesh.face_uvs(first).unwrap(),
+            [Vec2::ZERO, Vec2::X, Vec2::new(0.25, 0.0)],
+            "relative indices and a missing `v` component"
+        );
+        let second = faces.next().unwrap();
+        assert_eq!(
+            mesh.face_uvs(second),
+            None,
+            "an undefined UV drops the face's UVs"
+        );
     }
 
     #[test]
