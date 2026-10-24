@@ -15,6 +15,8 @@ pub const STAGING_BYTES: usize = 64 << 20;
 pub struct GpuBuffer {
     pub buffer: vk::Buffer,
     allocation: Option<Allocation>,
+    /// Size requested at creation, in bytes.
+    size: vk::DeviceSize,
 }
 
 impl GpuBuffer {
@@ -55,6 +57,7 @@ impl GpuBuffer {
         Ok(Self {
             buffer,
             allocation: Some(allocation),
+            size: size.max(1),
         })
     }
 
@@ -124,7 +127,13 @@ impl GpuBuffer {
         Self {
             buffer: vk::Buffer::null(),
             allocation: None,
+            size: 0,
         }
+    }
+
+    /// Size requested at creation, in bytes.
+    pub fn size(&self) -> vk::DeviceSize {
+        self.size
     }
 
     /// GPU address of the buffer, which must have been created with

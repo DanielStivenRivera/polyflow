@@ -171,6 +171,17 @@ impl BakeControl {
     pub fn rows_done(&self) -> u32 {
         self.rows_done.load(Ordering::Relaxed)
     }
+
+    /// Whether [`Self::cancel`] was called; bakers check it between pieces
+    /// of work.
+    pub fn cancel_requested(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Records `rows` more rows done; for bakers.
+    pub fn add_rows(&self, rows: u32) {
+        self.rows_done.fetch_add(rows, Ordering::Relaxed);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -211,16 +222,13 @@ pub fn bake(
     control: &BakeControl,
 ) -> Result<Baked, BakeError> {
     let (width, height) = (settings.width, settings.height);
-    let texels = width as usize * height as usize;
-    let maps = settings.maps;
-    let zeros = |wanted: bool, channels: usize| {
-        wanted.then(|| Map::filled(width, height, &vec![0.0; channels]))
-    };
-    let mut tangent = zeros(maps.tangent_normal, 3);
-    let mut object = zeros(maps.object_normal, 3);
-    let mut occlusion = zeros(maps.ambient_occlusion, 1);
-    let mut hits = vec![0u16; texels];
-    let mut covered = vec![0u16; texels];
+    let BakeSums {
+        tangent_normal: mut tangent,
+        object_normal: mut object,
+        ambient_occlusion: mut occlusion,
+        mut hits,
+        mut covered,
+    } = BakeSums::new(settings);
     let ao = AoSampler::new(settings, reference.mesh);
 
     let n = settings.samples.clamp(1, MAX_SAMPLES);
@@ -259,6 +267,64 @@ pub fn bake(
         }
     }
 
+    let sums = BakeSums {
+        tangent_normal: tangent,
+        object_normal: object,
+        ambient_occlusion: occlusion,
+        hits,
+        covered,
+    };
+    Ok(finish(sums, settings))
+}
+
+/// What a bake adds up over each texel's samples, before [`finish`] turns
+/// it into maps. Any baker (this one, the GPU one) fills these.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BakeSums {
+    /// Sum over the samples that hit of the tangent-space normal (unit
+    /// vector, green flipped for DirectX), not yet encoded as a color.
+    pub tangent_normal: Option<Map>,
+    /// Sum over the samples that hit of the reference normal; while no sample
+    /// of the texel has hit, of the low-poly's normal at the missed samples.
+    pub object_normal: Option<Map>,
+    /// Sum over the samples that hit of the visibility.
+    pub ambient_occlusion: Option<Map>,
+    /// Samples that hit, per texel.
+    pub hits: Vec<u16>,
+    /// Samples inside the UV layout, per texel.
+    pub covered: Vec<u16>,
+}
+
+impl BakeSums {
+    /// All zeros, with the maps `settings` asks for.
+    pub fn new(settings: &BakeSettings) -> Self {
+        let (width, height) = (settings.width, settings.height);
+        let texels = width as usize * height as usize;
+        let zeros = |wanted: bool, channels: usize| {
+            wanted.then(|| Map::filled(width, height, &vec![0.0; channels]))
+        };
+        let maps = settings.maps;
+        Self {
+            tangent_normal: zeros(maps.tangent_normal, 3),
+            object_normal: zeros(maps.object_normal, 3),
+            ambient_occlusion: zeros(maps.ambient_occlusion, 1),
+            hits: vec![0; texels],
+            covered: vec![0; texels],
+        }
+    }
+}
+
+/// Turns sums into maps: averages, normalizes and encodes them, puts neutral
+/// values where nothing was hit, then pads the islands.
+pub fn finish(sums: BakeSums, settings: &BakeSettings) -> Baked {
+    let (width, height) = (settings.width, settings.height);
+    let BakeSums {
+        tangent_normal: tangent,
+        object_normal: object,
+        ambient_occlusion: occlusion,
+        hits,
+        covered,
+    } = sums;
     // Turn sums into values; neutral values where nothing was hit.
     let mut out = Baked {
         tangent_normal: tangent,
@@ -325,7 +391,7 @@ pub fn bake(
     {
         padding.apply(map);
     }
-    Ok(out)
+    out
 }
 
 /// A map's rows, or as many `None`s if the map is not baked.
@@ -481,16 +547,26 @@ struct AoSampler {
     bias: f32,
 }
 
+/// The sample points every texel's occlusion rays use, before each texel
+/// shifts them (see [`texel_random`]).
+pub fn ao_points(settings: &BakeSettings) -> Vec<Vec2> {
+    let n = settings.ao_samples.max(1);
+    (0..n)
+        .map(|i| Vec2::new((i as f32 + 0.5) / n as f32, radical_inverse(i)))
+        .collect()
+}
+
+/// How far occlusion rays start off the reference surface.
+pub fn ao_bias(reference: &TriMesh) -> f32 {
+    reference.bounds().radius() * 1e-5
+}
+
 impl AoSampler {
     fn new(settings: &BakeSettings, mesh: &TriMesh) -> Self {
-        let n = settings.ao_samples.max(1);
-        let points = (0..n)
-            .map(|i| Vec2::new((i as f32 + 0.5) / n as f32, radical_inverse(i)))
-            .collect();
         Self {
-            points,
+            points: ao_points(settings),
             distance: settings.ao_distance,
-            bias: mesh.bounds().radius() * 1e-5,
+            bias: ao_bias(mesh),
         }
     }
 
@@ -536,8 +612,9 @@ fn radical_inverse(i: u32) -> f32 {
     i.reverse_bits() as f32 * (1.0 / 4_294_967_296.0)
 }
 
-/// Two well-mixed numbers in 0..1 for a texel's sample (PCG-style hash).
-fn texel_random(x: u32, y: u32, pass: u32) -> Vec2 {
+/// Two well-mixed numbers in 0..1 for a texel's sample (PCG-style hash),
+/// shifting its occlusion rays.
+pub fn texel_random(x: u32, y: u32, pass: u32) -> Vec2 {
     let hash = |mut v: u32| {
         v = v.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
         let w = ((v >> ((v >> 28) + 4)) ^ v).wrapping_mul(277_803_737);

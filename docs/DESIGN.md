@@ -114,7 +114,9 @@ crates/
 
 Dependency rule: `core` depends on nothing internal; `render` and `app` are the
 only crates allowed to touch the GPU or the window. Everything except `render`
-and `app` must build and test on a headless CI machine.
+and `app` must build and test on a headless CI machine. `render` uses `bake`
+and `spatial` for the GPU baker, which shares everything but ray tracing with
+the CPU one; `cli` bakes on the GPU through `render` without a window.
 
 ### Snapping vs. baking
 
@@ -188,9 +190,9 @@ validated against.
    imported from OBJ; shown in the viewport.
 5. ✅ Map export: PNG 8/16-bit and EXR half/float, with edge padding
    (dilation) and supersampling.
-6. GPU baker: Vulkan compute with `VK_KHR_ray_query`, compute BVH traversal
-   as fallback; matches the CPU reference within tolerance; hits the bake
-   budget.
+6. ✅ GPU baker: Vulkan compute with `VK_KHR_ray_query`, compute BVH
+   traversal as fallback; matches the CPU reference within tolerance; hits
+   the bake budget.
 7. Bake panel with progress and cancel, map preview on the low-poly,
    `polyflow-cli bake`, export of the low-poly as baked (see below), release
    v0.2.0.
@@ -221,7 +223,11 @@ The CPU baker projects by ray distance: each texel's ray starts a frontal
 distance in front of the low-poly (along its smooth normal) and runs back to
 a rear distance behind it; the first reference surface met is baked, as
 Cycles and Substance do. Texels whose ray meets nothing are reported as
-misses.
+misses. Ambient occlusion traces cosine-weighted rays from the hit, using the
+same Hammersley points in every texel, shifted per texel, so results are
+deterministic whatever the thread count. UV rasterization uses fixed-point
+coordinates (1/256 texel) and the top-left rule, like a GPU, so every texel
+inside a UV layout is covered exactly once.
 
 With a cage, the ray instead starts at the texel's point on the cage and
 runs through its point on the low-poly. A cage is the low-poly with moved
@@ -242,11 +248,26 @@ themselves, so it costs two counters per texel, not a buffer per sample.
 Edge padding then grows the islands ring by ring, each new texel averaging
 its already-filled neighbors (copying the nearest texel instead smears noisy
 border texels into streaks). Maps are written as 8- or 16-bit PNG or as
-half/float OpenEXR, as linear data with no color space conversion. Ambient occlusion traces cosine-weighted rays from the hit, using the
-same Hammersley points in every texel, shifted per texel, so results are
-deterministic whatever the thread count. UV rasterization uses fixed-point
-coordinates (1/256 texel) and the top-left rule, like a GPU, so every texel
-inside a UV layout is covered exactly once.
+half/float OpenEXR, as linear data with no color space conversion.
+
+### GPU baking
+
+`polyflow-render::bake` runs the CPU baker's per-sample work in a compute
+shader, a line-by-line port: same projection, tangent encoding, occlusion
+points and per-texel hash. Rays are traced with `VK_KHR_ray_query` against
+an acceleration structure of the reference (one opaque, two-sided geometry)
+or, on GPUs without it, through the reference's own BVH (`Bvh::gpu_nodes`)
+with the CPU's traversal and triangle test. The CPU still rasterizes the UVs
+and finishes the maps (`polyflow_bake::finish`), so only the ray tracing
+moves. The map is processed in bands of rows sized to about 32M rays per
+dispatch, so no dispatch runs long enough for the OS to reset the GPU, and
+per-band sums stay on the GPU until read back.
+
+Both GPU paths agree with the CPU baker to 0.0006° on average (AO and
+coverage identical) in `gpu_matches_cpu`. On an RTX 4070, a 4096² bake of
+both normal maps and AO (32 rays) from a 10M-triangle sculpt takes 0.76 s
+with ray queries, 2.2 s with the compute fallback and 9.5 s on a 32-thread
+CPU; with 4x4 samples per texel, 2.7 s.
 
 ## 9. Open questions
 

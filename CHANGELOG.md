@@ -43,6 +43,12 @@ All notable changes to Polyflow are documented here. The format follows
   islands so seams do not show with filtering and mipmaps (`--padding`,
   16 texels by default, or `full`). In float, normal maps agree with
   Cycles to 0.09° on average.
+- **GPU baking**: `polyflow-cli bake` runs on the GPU when there is one,
+  with hardware ray tracing (`VK_KHR_ray_query`) or, on GPUs without it,
+  through the sculpt's BVH in compute; `--cpu` bakes on the CPU. The maps
+  match the CPU baker's. A 4096x4096 bake of normal maps and AO from a
+  10M-triangle sculpt takes under a second on an RTX 4070 (about 10 s on a
+  32-thread CPU).
 
 ### Fixed
 

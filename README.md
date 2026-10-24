@@ -84,6 +84,9 @@ polyflow-cli bake sculpt.obj retopo.obj out/character --size 4096 --samples 2 --
 polyflow-cli bake sculpt.obj retopo.obj out/character --cage character_cage.obj
 ```
 
+Baking runs on the GPU when there is one (with hardware ray tracing where
+available) and on the CPU otherwise, or with `--cpu`; both give the same maps.
+
 ## Documentation
 
 - [Design document](docs/DESIGN.md) — goals, decisions, performance budgets, roadmap

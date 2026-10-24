@@ -2149,9 +2149,11 @@ name = "polyflow-cli"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "env_logger",
  "polyflow-bake",
  "polyflow-core",
  "polyflow-io",
+ "polyflow-render",
  "polyflow-spatial",
  "rayon",
 ]
@@ -2191,10 +2193,13 @@ dependencies = [
  "bytemuck",
  "egui",
  "egui-ash-renderer",
+ "env_logger",
  "gpu-allocator",
  "log",
  "meshopt",
+ "polyflow-bake",
  "polyflow-core",
+ "polyflow-spatial",
  "raw-window-handle",
  "rayon",
  "thiserror 2.0.21",

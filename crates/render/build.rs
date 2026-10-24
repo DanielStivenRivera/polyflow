@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs};
 
-const SHADERS: &[&str] = &["cull", "mesh", "overlay"];
+/// Shaders compiled to SPIR-V; other `.slang` files are only imported.
+const SHADERS: &[&str] = &["bake", "bake_rt", "cull", "mesh", "overlay"];
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
@@ -86,6 +87,8 @@ fn find_slangc() -> Option<PathBuf> {
 fn compile(slangc: &Path, src: &Path, dst: &Path) {
     let output = Command::new(slangc)
         .arg(src)
+        .arg("-I")
+        .arg(src.parent().unwrap())
         .args(["-target", "spirv", "-profile", "spirv_1_6"])
         // glam matrices are column-major.
         .arg("-matrix-layout-column-major")

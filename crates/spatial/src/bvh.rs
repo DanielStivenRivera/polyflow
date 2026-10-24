@@ -28,8 +28,9 @@ const PARALLEL_BINNING_MIN: usize = 1 << 17;
 const MAX_SAH_DEPTH: usize = 48;
 /// Stack size of the build threads.
 const BUILD_STACK_BYTES: usize = 64 << 20;
-/// Enough for `MAX_SAH_DEPTH` plus `log2` of the largest possible mesh.
-const STACK_SIZE: usize = MAX_SAH_DEPTH + 40;
+/// Traversal stack depth that always suffices: `MAX_SAH_DEPTH` plus `log2`
+/// of the largest possible mesh.
+pub const STACK_SIZE: usize = MAX_SAH_DEPTH + 40;
 
 /// A node in depth-first order. Internal nodes have their left child right
 /// after them and their right child at `self + index`; leaves (`count > 0`)
@@ -152,6 +153,28 @@ impl Bvh {
 
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// The hierarchy as plain words, for GPU traversal: 8 per node, in
+    /// storage order: `min` x, y, z (`f32` bits), `first`, `max` x, y, z,
+    /// `count`. A leaf has `count > 0` triangles,
+    /// `triangle_order()[first..first + count]`. An interior node has
+    /// `count == 0`; its left child follows it and its right child is
+    /// `first` nodes after it.
+    pub fn gpu_nodes(&self) -> Vec<u32> {
+        self.nodes
+            .iter()
+            .flat_map(|n| {
+                let [a, b, c] = n.min.to_array().map(f32::to_bits);
+                let [d, e, f] = n.max.to_array().map(f32::to_bits);
+                [a, b, c, n.index, d, e, f, n.count]
+            })
+            .collect()
+    }
+
+    /// Triangle ids in leaf order (see [`Self::gpu_nodes`]).
+    pub fn triangle_order(&self) -> &[u32] {
+        &self.triangles
     }
 
     /// Heap memory used by the hierarchy.

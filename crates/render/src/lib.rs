@@ -3,7 +3,8 @@
 //! This is the only crate (besides the `polyflow` app) allowed to talk to the GPU.
 //! Every `unsafe` block must carry a `// SAFETY:` comment.
 
-mod context;
+pub mod bake;
+pub mod context;
 mod memory;
 pub mod mesh;
 mod overlay;

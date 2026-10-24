@@ -12,9 +12,11 @@ authors.workspace = true
 polyflow-core.workspace = true
 polyflow-io.workspace = true
 polyflow-bake.workspace = true
+polyflow-render.workspace = true
 polyflow-spatial.workspace = true
 rayon.workspace = true
 anyhow.workspace = true
+env_logger.workspace = true
 
 [lints]
 workspace = true

@@ -8,7 +8,7 @@ use ash::ext::debug_utils;
 use ash::khr::{surface, swapchain};
 use ash::{Device, Entry, Instance, vk};
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 
 use crate::RenderError;
 
@@ -23,6 +23,7 @@ pub struct GpuContext {
     pub instance: Instance,
     debug: Option<(debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
     pub surface_loader: surface::Instance,
+    /// Null for a headless context.
     pub surface: vk::SurfaceKHR,
     pub physical_device: vk::PhysicalDevice,
     pub properties: vk::PhysicalDeviceProperties,
@@ -31,6 +32,8 @@ pub struct GpuContext {
     /// Valid bits in timestamps written on `queue`; 0 if unsupported.
     pub timestamp_valid_bits: u32,
     pub queue: vk::Queue,
+    /// Whether ray queries and acceleration structures are enabled.
+    pub ray_query: bool,
     pub allocator: ManuallyDrop<Arc<Mutex<Allocator>>>,
 }
 
@@ -43,6 +46,7 @@ impl std::fmt::Debug for GpuContext {
 }
 
 impl GpuContext {
+    /// A context that can present to `window`.
     pub fn new(window: &(impl HasDisplayHandle + HasWindowHandle)) -> Result<Self, RenderError> {
         let display = window
             .display_handle()
@@ -50,7 +54,16 @@ impl GpuContext {
         let window_handle = window
             .window_handle()
             .map_err(|e| RenderError::Window(e.to_string()))?;
+        Self::create(Some((display.as_raw(), window_handle.as_raw())))
+    }
 
+    /// A context without a window, for computing only (baking from the
+    /// command line, tests).
+    pub fn headless() -> Result<Self, RenderError> {
+        Self::create(None)
+    }
+
+    fn create(window: Option<(RawDisplayHandle, RawWindowHandle)>) -> Result<Self, RenderError> {
         // SAFETY: loading the system Vulkan library; the entry is kept alive in `Self`.
         let entry = unsafe { Entry::load()? };
 
@@ -61,7 +74,10 @@ impl GpuContext {
             );
         }
 
-        let mut extensions = ash_window::enumerate_required_extensions(display.as_raw())?.to_vec();
+        let mut extensions = match window {
+            Some((display, _)) => ash_window::enumerate_required_extensions(display)?.to_vec(),
+            None => Vec::new(),
+        };
         if validation {
             extensions.push(debug_utils::NAME.as_ptr());
         }
@@ -99,19 +115,17 @@ impl GpuContext {
         };
 
         let surface_loader = surface::Instance::new(&entry, &instance);
-        // SAFETY: the handles come from a live window that outlives the renderer.
-        let surface = unsafe {
-            ash_window::create_surface(
-                &entry,
-                &instance,
-                display.as_raw(),
-                window_handle.as_raw(),
-                None,
-            )?
+        let surface = match window {
+            // SAFETY: the handles come from a live window that outlives the renderer.
+            Some((display, window)) => unsafe {
+                ash_window::create_surface(&entry, &instance, display, window, None)?
+            },
+            None => vk::SurfaceKHR::null(),
         };
 
         let (physical_device, queue_family) =
             pick_physical_device(&instance, &surface_loader, surface)?;
+        let ray_query = supports_ray_query(&instance, physical_device);
         // SAFETY: `physical_device` was enumerated from `instance`.
         let properties = unsafe { instance.get_physical_device_properties(physical_device) };
 
@@ -119,7 +133,18 @@ impl GpuContext {
         let queue_infos = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family)
             .queue_priorities(&priorities)];
-        let device_extensions = [swapchain::NAME.as_ptr()];
+        let mut device_extensions = Vec::new();
+        if surface != vk::SurfaceKHR::null() {
+            device_extensions.push(swapchain::NAME.as_ptr());
+        }
+        let mut acceleration_features =
+            vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
+                .acceleration_structure(true);
+        let mut ray_query_features =
+            vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
+        if ray_query {
+            device_extensions.extend(RAY_QUERY_EXTENSIONS.iter().map(|e| e.as_ptr()));
+        }
         let mut features13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true)
@@ -134,6 +159,11 @@ impl GpuContext {
             .features(core_features)
             .push_next(&mut features12)
             .push_next(&mut features13);
+        if ray_query {
+            features = features
+                .push_next(&mut acceleration_features)
+                .push_next(&mut ray_query_features);
+        }
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&device_extensions)
@@ -169,9 +199,18 @@ impl GpuContext {
             queue_family,
             timestamp_valid_bits,
             queue,
+            ray_query,
             allocator: ManuallyDrop::new(Arc::new(Mutex::new(allocator))),
         };
-        log::info!("Using GPU: {}", ctx.device_name());
+        log::info!(
+            "Using GPU: {}{}",
+            ctx.device_name(),
+            if ray_query {
+                " (hardware ray tracing)"
+            } else {
+                ""
+            }
+        );
         Ok(ctx)
     }
 
@@ -199,7 +238,9 @@ impl Drop for GpuContext {
             // The allocator frees its memory blocks on drop, so it must go before the device.
             ManuallyDrop::drop(&mut self.allocator);
             self.device.destroy_device(None);
-            self.surface_loader.destroy_surface(self.surface, None);
+            if self.surface != vk::SurfaceKHR::null() {
+                self.surface_loader.destroy_surface(self.surface, None);
+            }
             if let Some((loader, messenger)) = self.debug.take() {
                 loader.destroy_debug_utils_messenger(messenger, None);
             }
@@ -256,8 +297,43 @@ unsafe extern "system" fn debug_callback(
     vk::FALSE
 }
 
-/// Picks a Vulkan 1.3 GPU that can present to `surface`, preferring discrete
-/// GPUs. `POLYFLOW_GPU=<substring>` forces a GPU by name.
+/// Device extensions for hardware ray tracing from compute shaders.
+const RAY_QUERY_EXTENSIONS: [&CStr; 3] = [
+    ash::khr::acceleration_structure::NAME,
+    ash::khr::deferred_host_operations::NAME,
+    ash::khr::ray_query::NAME,
+];
+
+/// Whether the GPU can trace rays from compute shaders. `POLYFLOW_RAY_QUERY=0`
+/// turns it off, to exercise the fallback.
+fn supports_ray_query(instance: &Instance, pd: vk::PhysicalDevice) -> bool {
+    if std::env::var("POLYFLOW_RAY_QUERY").is_ok_and(|v| v == "0") {
+        return false;
+    }
+    // SAFETY: plain queries on an enumerated physical device.
+    let extensions =
+        unsafe { instance.enumerate_device_extension_properties(pd) }.unwrap_or_default();
+    let has = |name: &CStr| {
+        extensions
+            .iter()
+            .any(|e| e.extension_name_as_c_str() == Ok(name))
+    };
+    if !RAY_QUERY_EXTENSIONS.iter().all(|&e| has(e)) {
+        return false;
+    }
+    let mut acceleration = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
+    let mut query = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
+    let mut features = vk::PhysicalDeviceFeatures2::default()
+        .push_next(&mut acceleration)
+        .push_next(&mut query);
+    // SAFETY: as above.
+    unsafe { instance.get_physical_device_features2(pd, &mut features) };
+    acceleration.acceleration_structure == vk::TRUE && query.ray_query == vk::TRUE
+}
+
+/// Picks a Vulkan 1.3 GPU that can present to `surface` (any, if it is
+/// null), preferring discrete GPUs. `POLYFLOW_GPU=<substring>` forces a GPU
+/// by name.
 fn pick_physical_device(
     instance: &Instance,
     surface_loader: &surface::Instance,
@@ -279,7 +355,7 @@ fn pick_physical_device(
             log::debug!("Skipping {name}: Vulkan 1.3 not supported");
             continue;
         }
-        if !supports_required_features(instance, pd) {
+        if !supports_required_features(instance, pd, surface != vk::SurfaceKHR::null()) {
             log::debug!("Skipping {name}: missing required features");
             continue;
         }
@@ -307,13 +383,14 @@ fn pick_physical_device(
         .ok_or(RenderError::NoSuitableGpu)
 }
 
-fn supports_required_features(instance: &Instance, pd: vk::PhysicalDevice) -> bool {
+fn supports_required_features(instance: &Instance, pd: vk::PhysicalDevice, present: bool) -> bool {
     // SAFETY: plain queries on an enumerated physical device.
     let extensions =
         unsafe { instance.enumerate_device_extension_properties(pd) }.unwrap_or_default();
-    if !extensions
-        .iter()
-        .any(|e| e.extension_name_as_c_str() == Ok(swapchain::NAME))
+    if present
+        && !extensions
+            .iter()
+            .any(|e| e.extension_name_as_c_str() == Ok(swapchain::NAME))
     {
         return false;
     }
@@ -349,9 +426,10 @@ fn find_queue_family(
     families.iter().enumerate().find_map(|(i, family)| {
         let i = i as u32;
         let graphics = family.queue_flags.contains(vk::QueueFlags::GRAPHICS);
-        // SAFETY: as above.
-        let present = unsafe { surface_loader.get_physical_device_surface_support(pd, i, surface) }
-            .unwrap_or(false);
+        let present = surface == vk::SurfaceKHR::null()
+            // SAFETY: as above.
+            || unsafe { surface_loader.get_physical_device_surface_support(pd, i, surface) }
+                .unwrap_or(false);
         (graphics && present).then_some(i)
     })
 }

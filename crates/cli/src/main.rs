@@ -29,12 +29,15 @@ Bake options (distances in scene units; defaults scale with the sculpt):
   --ao-samples <n>       Occlusion rays per texel (default 32)
   --ao-distance <d>      Occluders further away are ignored (default 25% of the radius)
   --directx              Green down (-Y) in the tangent-space normal map, for Unreal
+  --cpu                  Bake on the CPU even if a GPU is available (the GPU is used by
+                         default; both give the same maps)
   --samples <n>          Antialiasing: n x n samples per texel, 1 to 8 (default 1)
   --padding <px|full>    Extend UV islands this many texels into the background, or over the
                          whole map (default 16)
   --format <f>           png8 (default), png16, exr16 (half float) or exr32 (float)";
 
 fn main() -> ExitCode {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args
         .iter()
@@ -252,6 +255,7 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
     let mut ao_samples = None;
     let mut ao_distance = None;
     let mut directx = false;
+    let mut force_cpu = false;
     let mut samples = None;
     // `Some(None)`: fill the whole map.
     let mut padding: Option<Option<u32>> = None;
@@ -283,6 +287,7 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
             "--ao-samples" => ao_samples = Some(number(flag)? as u32),
             "--ao-distance" => ao_distance = Some(number(flag)?),
             "--directx" => directx = true,
+            "--cpu" => force_cpu = true,
             "--samples" => {
                 let n = number(flag)? as u32;
                 if !(1..=polyflow_bake::MAX_SAMPLES).contains(&n) {
@@ -395,12 +400,36 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
         n = settings.samples
     );
 
-    let start = Instant::now();
     let reference = Reference {
         mesh: &high,
         bvh: &bvh,
     };
-    let baked = polyflow_bake::bake(&low, reference, &settings, &BakeControl::default())?;
+    let gpu = if force_cpu {
+        None
+    } else {
+        match polyflow_render::context::GpuContext::headless() {
+            Ok(ctx) => Some(ctx),
+            Err(e) => {
+                println!("device      no usable GPU ({e}); baking on the CPU");
+                None
+            }
+        }
+    };
+    let start = Instant::now();
+    let baked = match &gpu {
+        Some(ctx) => {
+            let tracer = match polyflow_render::bake::Tracer::Auto.resolve(ctx) {
+                polyflow_render::bake::Tracer::RayQuery => "hardware ray tracing",
+                _ => "compute ray tracing",
+            };
+            println!("device      {}, {tracer}", ctx.device_name());
+            polyflow_render::bake::bake(ctx, &low, reference, &settings, &BakeControl::default())?
+        }
+        None => {
+            println!("device      CPU, {} threads", rayon::current_num_threads());
+            polyflow_bake::bake(&low, reference, &settings, &BakeControl::default())?
+        }
+    };
     let time = start.elapsed().as_secs_f64();
     // Per sample: the projection ray, plus occlusion rays when it hits.
     let samples = (settings.samples * settings.samples) as f64;

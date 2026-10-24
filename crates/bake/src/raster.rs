@@ -35,6 +35,10 @@ const BAND: usize = 16;
 pub struct UvRaster {
     pub width: u32,
     pub height: u32,
+    /// The rows rasterized (all of them unless [`rasterize_rows`] was used):
+    /// the arrays below start at row `first_row` and hold `rows` rows.
+    pub first_row: u32,
+    pub rows: u32,
     /// Triangle per texel, row by row; [`NO_TRIANGLE`] where none.
     pub triangles: Vec<u32>,
     pub barycentrics: Vec<[f32; 2]>,
@@ -49,16 +53,17 @@ pub struct UvRaster {
 }
 
 impl UvRaster {
-    /// The triangle and barycentric coordinates at texel `(x, y)`.
+    /// The triangle and barycentric coordinates at texel `(x, y)` (`y` from
+    /// the top of the map, within the rasterized rows).
     pub fn texel(&self, x: u32, y: u32) -> Option<(u32, [f32; 2])> {
-        let i = y as usize * self.width as usize + x as usize;
+        let i = (y - self.first_row) as usize * self.width as usize + x as usize;
         let t = self.triangles[i];
         (t != NO_TRIANGLE).then(|| (t, self.barycentrics[i]))
     }
 
-    /// Fraction of the map covered.
+    /// Fraction of the rasterized rows covered.
     pub fn coverage(&self) -> f64 {
-        self.covered as f64 / (self.width as f64 * self.height as f64).max(1.0)
+        self.covered as f64 / (self.width as f64 * self.rows as f64).max(1.0)
     }
 }
 
@@ -77,11 +82,30 @@ struct Setup {
 /// Rasterizes `mesh`'s UVs at `width` x `height`, sampling each texel at
 /// `offset` (in texels from its top-left corner; 0.5 is the center).
 pub fn rasterize(mesh: &BakeMesh, width: u32, height: u32, offset: Vec2) -> UvRaster {
+    rasterize_rows(mesh, width, height, offset, 0..height)
+}
+
+/// Like [`rasterize`], for the rows `rows` of the map only, so a large map
+/// can be processed in bands.
+pub fn rasterize_rows(
+    mesh: &BakeMesh,
+    width: u32,
+    height: u32,
+    offset: Vec2,
+    rows: std::ops::Range<u32>,
+) -> UvRaster {
     assert!(
         (1..=MAX_SIZE).contains(&width) && (1..=MAX_SIZE).contains(&height),
         "map size {width}x{height} out of range"
     );
-    let (w, h) = (width as usize, height as usize);
+    assert!(
+        rows.start < rows.end && rows.end <= height,
+        "rows {rows:?} out of range"
+    );
+    let w = width as usize;
+    // Rows of the map before and after the band.
+    let (r0, r1) = (rows.start as i64, rows.end as i64);
+    let band_rows = (r1 - r0) as usize;
     let offset = [
         (offset.x * ONE as f32).round() as i64,
         (offset.y * ONE as f32).round() as i64,
@@ -89,8 +113,10 @@ pub fn rasterize(mesh: &BakeMesh, width: u32, height: u32, offset: Vec2) -> UvRa
     let mut out = UvRaster {
         width,
         height,
-        triangles: vec![NO_TRIANGLE; w * h],
-        barycentrics: vec![[0.0; 2]; w * h],
+        first_row: rows.start,
+        rows: rows.end - rows.start,
+        triangles: vec![NO_TRIANGLE; w * band_rows],
+        barycentrics: vec![[0.0; 2]; w * band_rows],
         covered: 0,
         overlaps: 0,
         degenerate: 0,
@@ -99,7 +125,7 @@ pub fn rasterize(mesh: &BakeMesh, width: u32, height: u32, offset: Vec2) -> UvRa
 
     // Set up every triangle and bin it into the bands of rows it touches.
     let mut setups: Vec<Option<Setup>> = Vec::with_capacity(mesh.triangle_count());
-    let mut bins: Vec<Vec<u32>> = vec![Vec::new(); h.div_ceil(BAND)];
+    let mut bins: Vec<Vec<u32>> = vec![Vec::new(); band_rows.div_ceil(BAND)];
     for t in 0..mesh.triangle_count() {
         let corners = mesh.triangle(t);
         // Also catches NaN.
@@ -138,9 +164,9 @@ pub fn rasterize(mesh: &BakeMesh, width: u32, height: u32, offset: Vec2) -> UvRa
             .map(|v| v.clamp(-1, size as i64))
         };
         let cols = range(0, w);
-        let rows = range(1, h);
-        let first = rows[0].max(0);
-        let last = rows[1].min(h as i64 - 1);
+        let rows = range(1, height as usize);
+        let first = rows[0].max(r0);
+        let last = rows[1].min(r1 - 1);
         if cols[0] > cols[1].min(w as i64 - 1) || cols[1] < 0 || first > last {
             setups.push(None);
             continue;
@@ -152,7 +178,7 @@ pub fn rasterize(mesh: &BakeMesh, width: u32, height: u32, offset: Vec2) -> UvRa
             rows: [first, last],
             cols: [cols[0].max(0), cols[1].min(w as i64 - 1)],
         }));
-        for bin in &mut bins[first as usize / BAND..=last as usize / BAND] {
+        for bin in &mut bins[(first - r0) as usize / BAND..=(last - r0) as usize / BAND] {
             bin.push(t as u32);
         }
     }
@@ -164,7 +190,7 @@ pub fn rasterize(mesh: &BakeMesh, width: u32, height: u32, offset: Vec2) -> UvRa
         .zip(&bins)
         .enumerate()
         .map(|(band, ((triangles, barycentrics), bin))| {
-            let row0 = (band * BAND) as i64;
+            let row0 = r0 + (band * BAND) as i64;
             let rows = (triangles.len() / w) as i64;
             let (mut covered, mut overlaps) = (0, 0);
             for &t in bin {
@@ -308,6 +334,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn bands_match_the_whole_map() {
+        let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+        let mesh = BakeMesh::from_retopo(&jittered_square(5, &mut rng));
+        let offset = Vec2::new(0.3, 0.6);
+        let whole = rasterize(&mesh, 40, 37, offset);
+        let mut covered = 0;
+        for rows in [0..1, 1..17, 17..20, 20..37] {
+            let band = rasterize_rows(&mesh, 40, 37, offset, rows.clone());
+            assert_eq!((band.first_row, band.rows), (rows.start, rows.len() as u32));
+            for y in rows {
+                for x in 0..40 {
+                    assert_eq!(band.texel(x, y), whole.texel(x, y), "({x}, {y})");
+                }
+            }
+            covered += band.covered;
+        }
+        assert_eq!(covered, whole.covered);
     }
 
     #[test]

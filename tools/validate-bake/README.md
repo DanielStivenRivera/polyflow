@@ -13,7 +13,8 @@ polyflow-cli bake out/high.obj out/low.obj out/ours --size 1024 --distance 0.05 
 blender --background --factory-startup --python tools/validate-bake/compare.py -- out
 ```
 
-`--padding 0` matters: the comparison finds the baked texels by the
+The bake runs on the GPU if there is one; `--cpu` checks the CPU baker,
+which gives the same figures. `--padding 0` matters: the comparison finds the baked texels by the
 background Polyflow leaves around the UV islands. Without `--format exr32`
 the maps are compared as 8-bit PNGs.
 

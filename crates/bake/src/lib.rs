@@ -21,9 +21,9 @@ pub mod tangent;
 
 pub use cage::{Cage, CageMismatch};
 pub use cpu::{
-    BakeControl, BakeError, BakeSettings, Baked, Coverage, MAX_SAMPLES, Map, MapSet, NormalY,
-    Reference, bake,
+    BakeControl, BakeError, BakeSettings, BakeSums, Baked, Coverage, MAX_SAMPLES, Map, MapSet,
+    NormalY, Reference, bake, finish,
 };
 pub use mesh::{BakeMesh, Corner, SurfaceSample};
-pub use raster::{UvRaster, rasterize};
+pub use raster::{UvRaster, rasterize, rasterize_rows};
 pub use tangent::TangentFrame;
