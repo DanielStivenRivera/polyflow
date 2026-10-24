@@ -3,10 +3,13 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
+use polyflow_bake::Cage;
 use polyflow_core::camera::OrbitCamera;
 use polyflow_core::glam::Vec3;
 use polyflow_core::halfedge::HalfEdgeMesh;
-use polyflow_io::project::{self, CameraState, ProjectSettings, ReferencePath, ToolState};
+use polyflow_io::project::{
+    self, CageState, CameraState, ProjectSettings, ReferencePath, ToolState,
+};
 use polyflow_io::retopo::ImportedRetopo;
 
 use crate::AppState;
@@ -135,6 +138,10 @@ impl AppState {
             x_ray: self.retopo.x_ray,
             surface_offset: self.retopo.surface_offset,
             uv_checker: self.retopo.uv_checker,
+            cage: CageState {
+                push: self.retopo.cage_push,
+                show: self.retopo.show_cage,
+            },
             tools: ToolState {
                 strip_width: t.strip_width,
                 brush_radius: t.brush_radius,
@@ -153,6 +160,8 @@ impl AppState {
         self.retopo.x_ray = settings.x_ray;
         self.retopo.surface_offset = settings.surface_offset;
         self.retopo.uv_checker = settings.uv_checker;
+        self.retopo.cage_push = settings.cage.push;
+        self.retopo.show_cage = settings.cage.show;
         let t = settings.tools;
         self.tools.settings = ToolSettings {
             strip_width: t.strip_width,
@@ -217,7 +226,8 @@ impl AppState {
     /// Writes the project to `path`. Returns whether it was saved.
     fn save_project_to(&mut self, path: PathBuf) -> bool {
         let settings = self.project_settings(&path);
-        match project::save(&path, &settings, self.retopo.mesh()) {
+        let cage = self.imported_cage_mesh();
+        match project::save(&path, &settings, self.retopo.mesh(), cage.as_ref()) {
             Ok(()) => {
                 log::info!("Saved project to {}", path.display());
                 self.tools.status = Some(format!("Saved {}", jobs::display_name(&path)));
@@ -264,6 +274,16 @@ impl AppState {
         };
         log::info!("Opened project {}", path.display());
         self.retopo.replace_mesh(project.retopo);
+        if let Some(cage) = &project.cage {
+            match Cage::from_mesh(self.retopo.mesh(), cage) {
+                Ok(cage) => self.retopo.set_imported_cage(Some(cage)),
+                Err(e) => {
+                    self.ui.error = Some(format!(
+                        "The project's bake cage was not loaded ({e}); the automatic cage is used."
+                    ))
+                }
+            }
+        }
         self.tools.reset();
         self.apply_project_settings(&project.settings);
         self.project_path = (!recovered).then(|| path.to_path_buf());
@@ -480,6 +500,90 @@ impl AppState {
         );
     }
 
+    /// The imported cage as a mesh to save, if there is one that fits.
+    fn imported_cage_mesh(&self) -> Option<HalfEdgeMesh> {
+        let mesh = self.retopo.mesh();
+        self.retopo
+            .imported_cage()
+            .filter(|c| c.fits(mesh))
+            .map(|c| c.apply(mesh))
+    }
+
+    pub(crate) fn import_cage(&mut self) {
+        self.ask(
+            |parent| {
+                rfd::FileDialog::new()
+                    .set_title("Import bake cage")
+                    .add_filter("OBJ", &["obj"])
+                    .set_parent(parent)
+                    .pick_file()
+            },
+            |state, picked| {
+                let Some(path) = picked else { return };
+                let cage = polyflow_io::retopo::load(&path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|c| {
+                        Cage::from_mesh(state.retopo.mesh(), &c.mesh).map_err(|e| e.to_string())
+                    });
+                match cage {
+                    Ok(cage) => {
+                        state.retopo.set_imported_cage(Some(cage));
+                        state.retopo.show_cage = true;
+                        // The cage is saved with the project.
+                        state.saved_version = u64::MAX;
+                        state.tools.status =
+                            Some(format!("Imported the cage {}", jobs::display_name(&path)));
+                    }
+                    Err(e) => {
+                        state.ui.error = Some(format!(
+                            "{} does not fit the retopology: {e}. A cage must be the retopology \
+                             exported by Polyflow with vertices moved, none added, removed or \
+                             reordered.",
+                            jobs::display_name(&path)
+                        ))
+                    }
+                }
+            },
+        );
+    }
+
+    /// Exports the cage in use (imported or automatic) as OBJ, to edit it in
+    /// another program and import it back.
+    pub(crate) fn export_cage(&mut self) {
+        if self.retopo.mesh().is_empty() {
+            self.ui.error = Some("There is no retopology to export a cage of.".into());
+            return;
+        }
+        let default_name = self
+            .project_path
+            .as_deref()
+            .and_then(|p| p.file_stem())
+            .map_or("retopo".to_owned(), |s| s.to_string_lossy().into_owned());
+        self.ask(
+            move |parent| {
+                rfd::FileDialog::new()
+                    .set_title("Export bake cage")
+                    .add_filter("OBJ", &["obj"])
+                    .set_file_name(format!("{default_name}_cage.obj"))
+                    .set_parent(parent)
+                    .save_file()
+            },
+            |state, picked| {
+                let Some(path) = picked else { return };
+                let cage = state.retopo.cage().apply(state.retopo.mesh());
+                match polyflow_io::retopo::save(&path, &cage) {
+                    Ok(()) => {
+                        state.tools.status =
+                            Some(format!("Exported the cage {}", jobs::display_name(&path)))
+                    }
+                    Err(e) => {
+                        state.ui.error = Some(format!("Could not export {}: {e}", path.display()))
+                    }
+                }
+            },
+        );
+    }
+
     /// Runs `then` once unsaved work may be thrown away: right away if there
     /// is none, otherwise after asking (and saving, if the user wants to).
     pub(crate) fn confirm_discard(&mut self, what: &str, then: impl FnOnce(&mut Self) + 'static) {
@@ -557,7 +661,15 @@ impl AppState {
         let path = autosave_path()?;
         let result = std::fs::create_dir_all(path.parent().expect("autosave path has a folder"))
             .map_err(project::ProjectError::from)
-            .and_then(|()| project::save(&path, &self.project_settings(&path), self.retopo.mesh()));
+            .and_then(|()| {
+                let cage = self.imported_cage_mesh();
+                project::save(
+                    &path,
+                    &self.project_settings(&path),
+                    self.retopo.mesh(),
+                    cage.as_ref(),
+                )
+            });
         match result {
             Ok(()) => {
                 log::info!("Autosaved to {}", path.display());

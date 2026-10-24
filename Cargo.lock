@@ -2070,6 +2070,7 @@ dependencies = [
  "egui-winit",
  "env_logger",
  "log",
+ "polyflow-bake",
  "polyflow-core",
  "polyflow-io",
  "polyflow-render",

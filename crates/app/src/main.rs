@@ -670,6 +670,12 @@ impl AppState {
             cursor_in_viewport,
         };
         let retopo_stats = self.retopo.stats();
+        let cage_imported = self
+            .retopo
+            .imported_cage()
+            .map(|_| !self.retopo.imported_cage_is_stale());
+        let auto_cage_push = self.retopo.scene_radius * retopo::DEFAULT_CAGE_PUSH;
+        let scene_radius = self.retopo.scene_radius;
         let mut retopo_ui = RetopoUi {
             tool: &mut self.tools.active,
             settings: &mut self.tools.settings,
@@ -677,6 +683,11 @@ impl AppState {
             x_ray: &mut self.retopo.x_ray,
             surface_offset: &mut self.retopo.surface_offset,
             uv_checker: &mut self.retopo.uv_checker,
+            show_cage: &mut self.retopo.show_cage,
+            cage_push: &mut self.retopo.cage_push,
+            auto_cage_push,
+            scene_radius,
+            cage_imported,
             status: &mut self.tools.status,
             undo_name: self.retopo.doc.undo_name(),
             redo_name: self.retopo.doc.redo_name(),
@@ -730,7 +741,9 @@ impl AppState {
         let x_ray = self.retopo.x_ray;
         let surface_offset = self.retopo.surface_offset;
         let view_proj = self.camera.view_projection(self.viewport_aspect());
-        let mesh_overlay = self.retopo.mesh_overlay();
+        self.retopo.update_overlays();
+        let mut overlays = vec![self.retopo.mesh_overlay(), &self.tool_overlay];
+        overlays.extend(self.retopo.cage_overlay());
         self.renderer.set_vsync(self.ui.vsync);
 
         let [r, g, b] = self.ui.mesh_color;
@@ -744,7 +757,7 @@ impl AppState {
                 show_meshlets: self.ui.show_meshlets,
             },
             clear_color: BACKGROUND,
-            overlays: &[mesh_overlay, &self.tool_overlay],
+            overlays: &overlays,
             overlay_style: OverlayStyle {
                 line_width: 1.5 * ppp,
                 x_ray,
@@ -817,6 +830,13 @@ impl AppState {
             self.import_retopo();
         } else if actions.export_retopo {
             self.export_retopo();
+        } else if actions.import_cage {
+            self.import_cage();
+        } else if actions.export_cage {
+            self.export_cage();
+        } else if actions.clear_cage {
+            self.retopo.set_imported_cage(None);
+            self.saved_version = u64::MAX;
         }
     }
 

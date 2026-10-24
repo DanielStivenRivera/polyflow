@@ -184,7 +184,7 @@ validated against.
 3. ✅ CPU reference baker: tangent- and object-space normals and AO with
    ray-distance projection, on the CPU BVH with `rayon`; analytic tests, and
    a cross-check against Cycles (`tools/validate-bake`).
-4. Cage: automatic (low-poly pushed along averaged normals, adjustable) or
+4. ✅ Cage: automatic (low-poly pushed along averaged normals, adjustable) or
    imported from OBJ; shown in the viewport.
 5. Map export: PNG 8/16-bit and EXR half/float, with edge padding (dilation)
    and supersampling.
@@ -221,7 +221,17 @@ The CPU baker projects by ray distance: each texel's ray starts a frontal
 distance in front of the low-poly (along its smooth normal) and runs back to
 a rear distance behind it; the first reference surface met is baked, as
 Cycles and Substance do. Texels whose ray meets nothing are reported as
-misses. Ambient occlusion traces cosine-weighted rays from the hit, using the
+misses.
+
+With a cage, the ray instead starts at the texel's point on the cage and
+runs through its point on the low-poly. A cage is the low-poly with moved
+vertices (`polyflow-bake::cage`): automatic (pushed along the smooth
+normals, so it stays closed across UV seams; on a flat surface it casts
+exactly the rays of the frontal distance) or imported. An imported cage is
+matched to the retopology by vertex order and checked face by face, so the
+workflow is: export the cage from Polyflow, edit it elsewhere moving
+vertices only, import it back. It is stored in the project as `cage.obj`
+and falls back to the automatic cage once vertices are added or removed. Ambient occlusion traces cosine-weighted rays from the hit, using the
 same Hammersley points in every texel, shifted per texel, so results are
 deterministic whatever the thread count. UV rasterization uses fixed-point
 coordinates (1/256 texel) and the top-left rule, like a GPU, so every texel

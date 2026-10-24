@@ -3,7 +3,9 @@
 //! A project is a zip archive with two entries:
 //! - `project.json`: the format version, where the reference mesh is, and the
 //!   view and tool settings;
-//! - `retopo.obj`: the retopology mesh as polygon OBJ, with its UVs.
+//! - `retopo.obj`: the retopology mesh as polygon OBJ, with its UVs;
+//! - `cage.obj` (optional): an imported bake cage, the retopology with moved
+//!   vertices.
 //!
 //! The reference mesh is not embedded (sculpts can be gigabytes). Its path is
 //! stored both relative to the project and absolute, so a project keeps
@@ -27,6 +29,7 @@ pub const FORMAT_VERSION: u32 = 1;
 const FORMAT_NAME: &str = "polyflow-project";
 const MANIFEST: &str = "project.json";
 const RETOPO: &str = "retopo.obj";
+const CAGE: &str = "cage.obj";
 /// Upper bounds on entry sizes, so a malicious archive cannot exhaust memory.
 const MAX_MANIFEST_BYTES: u64 = 16 << 20;
 const MAX_RETOPO_BYTES: u64 = 2 << 30;
@@ -150,6 +153,17 @@ pub struct ProjectSettings {
     /// Show the retopology's UVs as a checker pattern.
     pub uv_checker: bool,
     pub tools: ToolState,
+    pub cage: CageState,
+}
+
+/// How the bake cage is set up and shown.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CageState {
+    /// How far the automatic cage is pushed out, in scene units; `None` to
+    /// derive it from the sculpt's size.
+    pub push: Option<f32>,
+    pub show: bool,
 }
 
 impl Default for ProjectSettings {
@@ -162,6 +176,7 @@ impl Default for ProjectSettings {
             surface_offset: 0.01,
             uv_checker: false,
             tools: ToolState::default(),
+            cage: CageState::default(),
         }
     }
 }
@@ -183,6 +198,8 @@ pub struct Project {
     pub retopo: HalfEdgeMesh,
     /// Retopology faces that could not be restored (see [`retopo::ImportedRetopo`]).
     pub skipped_faces: usize,
+    /// The imported cage, if the project has one.
+    pub cage: Option<HalfEdgeMesh>,
 }
 
 /// Saves a project atomically: written next to `path`, then renamed into place.
@@ -190,12 +207,13 @@ pub fn save(
     path: &Path,
     settings: &ProjectSettings,
     retopo_mesh: &HalfEdgeMesh,
+    cage: Option<&HalfEdgeMesh>,
 ) -> Result<(), ProjectError> {
     let mut temp = path.as_os_str().to_owned();
     temp.push(".tmp");
     let temp = PathBuf::from(temp);
     let result =
-        write(&temp, settings, retopo_mesh).and_then(|()| Ok(std::fs::rename(&temp, path)?));
+        write(&temp, settings, retopo_mesh, cage).and_then(|()| Ok(std::fs::rename(&temp, path)?));
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
     }
@@ -206,6 +224,7 @@ fn write(
     path: &Path,
     settings: &ProjectSettings,
     retopo_mesh: &HalfEdgeMesh,
+    cage: Option<&HalfEdgeMesh>,
 ) -> Result<(), ProjectError> {
     let file = std::fs::File::create(path)?;
     let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
@@ -221,6 +240,10 @@ fn write(
     serde_json::to_writer_pretty(&mut zip, &manifest)?;
     zip.start_file(RETOPO, options)?;
     retopo::write_obj(retopo_mesh, &mut zip)?;
+    if let Some(cage) = cage {
+        zip.start_file(CAGE, options)?;
+        retopo::write_obj(cage, &mut zip)?;
+    }
     let mut out = zip.finish()?;
     out.flush()?;
     out.get_ref().sync_all()?;
@@ -246,23 +269,28 @@ pub fn load(path: &Path) -> Result<Project, ProjectError> {
         return Err(ProjectError::TooNew(manifest.format_version));
     }
 
-    let imported = match zip.by_name(RETOPO) {
-        Ok(entry) => {
-            let mut bytes = Vec::new();
-            entry.take(MAX_RETOPO_BYTES).read_to_end(&mut bytes)?;
-            retopo::parse_obj(&bytes)?
+    let mut read_mesh = |name: &str| -> Result<Option<retopo::ImportedRetopo>, ProjectError> {
+        match zip.by_name(name) {
+            Ok(entry) => {
+                let mut bytes = Vec::new();
+                entry.take(MAX_RETOPO_BYTES).read_to_end(&mut bytes)?;
+                Ok(Some(retopo::parse_obj(&bytes)?))
+            }
+            Err(zip::result::ZipError::FileNotFound) => Ok(None),
+            Err(e) => Err(e.into()),
         }
-        // A project saved before any retopology existed.
-        Err(zip::result::ZipError::FileNotFound) => retopo::ImportedRetopo {
-            mesh: HalfEdgeMesh::new(),
-            skipped_faces: 0,
-        },
-        Err(e) => return Err(e.into()),
     };
+    // Missing when the project was saved before any retopology existed.
+    let imported = read_mesh(RETOPO)?.unwrap_or(retopo::ImportedRetopo {
+        mesh: HalfEdgeMesh::new(),
+        skipped_faces: 0,
+    });
+    let cage = read_mesh(CAGE)?.map(|c| c.mesh);
     Ok(Project {
         settings: manifest.settings,
         retopo: imported.mesh,
         skipped_faces: imported.skipped_faces,
+        cage,
     })
 }
 
@@ -319,6 +347,12 @@ mod tests {
         let project_path = dir.join("work").join("character.pflow");
         std::fs::create_dir_all(project_path.parent().unwrap()).unwrap();
 
+        let mut cage = quad();
+        let ids: Vec<_> = cage.vertices().collect();
+        for v in ids {
+            let p = cage.position(v);
+            cage.set_position(v, p + Vec3::Z * 0.5);
+        }
         let settings = ProjectSettings {
             reference: Some(ReferencePath::new(&sculpt, &project_path)),
             camera: Some(CameraState {
@@ -332,17 +366,24 @@ mod tests {
             x_ray: true,
             surface_offset: 0.02,
             uv_checker: true,
+            cage: CageState {
+                push: Some(0.25),
+                show: true,
+            },
             tools: ToolState {
                 strip_width: 55.0,
                 ..ToolState::default()
             },
         };
-        save(&project_path, &settings, &quad()).unwrap();
+        save(&project_path, &settings, &quad(), Some(&cage)).unwrap();
         assert!(!dir.join("work").join("character.pflow.tmp").exists());
 
         let project = load(&project_path).unwrap();
         assert_eq!(project.settings, settings);
         assert_eq!(project.retopo.face_count(), 1);
+        let cage_back = project.cage.as_ref().unwrap();
+        assert_eq!(cage_back.vertex_count(), 4);
+        assert!(cage_back.vertices().all(|v| cage_back.position(v).z == 0.5));
         let face = project.retopo.faces().next().unwrap();
         assert_eq!(project.retopo.face_uvs(face).unwrap(), QUAD_UVS);
         assert_eq!(

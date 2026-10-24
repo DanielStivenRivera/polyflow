@@ -31,6 +31,12 @@ All notable changes to Polyflow are documented here. The format follows
   all three maps from a 1M-triangle sculpt takes about 6 s on a 32-thread CPU.
   Normal maps match Blender's Cycles bake of the same meshes to within 8-bit
   rounding (`tools/validate-bake`).
+- **Bake cage**: bake rays can start from a cage around the retopology,
+  either automatic (pushed out along the normals, with an adjustable push) or
+  edited in other software: export it with **File → Export bake cage OBJ**,
+  move vertices, import it back. The cage can be shown in the viewport and is
+  saved in the project. On the command line: `--cage-push <d>` or
+  `--cage <cage.obj>`.
 
 ### Fixed
 

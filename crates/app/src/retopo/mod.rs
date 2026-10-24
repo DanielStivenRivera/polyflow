@@ -8,6 +8,7 @@ pub mod symmetry;
 pub mod tools;
 pub mod view;
 
+use polyflow_bake::Cage;
 use polyflow_core::halfedge::HalfEdgeMesh;
 use polyflow_core::history::MeshDocument;
 use polyflow_render::{Overlay, OverlayLine, OverlayPoint, OverlayVertex, Rgba8};
@@ -26,6 +27,10 @@ pub const HOVER_COLOR: Rgba8 = Rgba8::new(255, 214, 64, 255);
 pub const HOVER_FACE_COLOR: Rgba8 = Rgba8::new(255, 214, 64, 70);
 pub const PENDING_COLOR: Rgba8 = Rgba8::new(255, 140, 40, 255);
 pub const VERTEX_SIZE: f32 = 7.0;
+pub const CAGE_COLOR: Rgba8 = Rgba8::new(140, 235, 90, 210);
+/// Default push of the automatic cage, as a fraction of the sculpt's radius
+/// (the bake's default ray distance).
+pub const DEFAULT_CAGE_PUSH: f32 = 0.03;
 
 /// The retopology mesh with its undo history and editing settings.
 #[derive(Debug)]
@@ -42,6 +47,18 @@ pub struct Retopo {
     pub uv_checker: bool,
     /// Size of the reference mesh, which scales symmetry tolerances.
     pub scene_radius: f32,
+    /// Draw the bake cage.
+    pub show_cage: bool,
+    /// Push of the automatic cage in scene units; `None` for the default.
+    pub cage_push: Option<f32>,
+    /// A cage imported from a file, used instead of the automatic one while
+    /// it still fits the mesh.
+    imported_cage: Option<Cage>,
+    /// Bumped whenever `imported_cage` changes.
+    imported_cage_generation: u64,
+    cage_overlay: Overlay,
+    /// Mesh version, push and imported cage the cage overlay was built for.
+    cage_overlay_key: Option<(u64, u32, u64)>,
     next_gesture: u64,
     mesh_overlay: Overlay,
     /// Mesh version and UV checker state the overlay was built for.
@@ -68,6 +85,12 @@ impl Default for Retopo {
             surface_offset: 0.01,
             uv_checker: false,
             scene_radius: 1.0,
+            show_cage: false,
+            cage_push: None,
+            imported_cage: None,
+            imported_cage_generation: 0,
+            cage_overlay: Overlay::default(),
+            cage_overlay_key: None,
             next_gesture: 0,
             mesh_overlay: Overlay::default(),
             mesh_overlay_key: None,
@@ -86,6 +109,39 @@ impl Retopo {
         self.doc = MeshDocument::new(mesh);
         self.mesh_overlay_key = None;
         self.stats = None;
+        self.set_imported_cage(None);
+    }
+
+    /// The automatic cage's push in scene units.
+    pub fn cage_push(&self) -> f32 {
+        self.cage_push
+            .unwrap_or(self.scene_radius * DEFAULT_CAGE_PUSH)
+    }
+
+    pub fn imported_cage(&self) -> Option<&Cage> {
+        self.imported_cage.as_ref()
+    }
+
+    pub fn set_imported_cage(&mut self, cage: Option<Cage>) {
+        self.imported_cage = cage;
+        self.imported_cage_generation += 1;
+    }
+
+    /// Whether the imported cage no longer fits (vertices were added or
+    /// removed since), so the automatic cage is used instead.
+    pub fn imported_cage_is_stale(&self) -> bool {
+        self.imported_cage
+            .as_ref()
+            .is_some_and(|c| !c.fits(self.doc.mesh()))
+    }
+
+    /// The cage a bake would use: the imported one if it fits, else the
+    /// automatic one.
+    pub fn cage(&self) -> Cage {
+        match &self.imported_cage {
+            Some(cage) if cage.fits(self.doc.mesh()) => cage.clone(),
+            _ => Cage::automatic(self.doc.mesh(), self.cage_push()),
+        }
     }
 
     pub fn symmetry(&self) -> Option<Symmetry> {
@@ -99,15 +155,36 @@ impl Retopo {
         self.next_gesture
     }
 
-    /// The mesh as overlay geometry, rebuilt only when the mesh or the way
-    /// it is shown changed.
-    pub fn mesh_overlay(&mut self) -> &Overlay {
-        let key = (self.doc.mesh().version(), self.uv_checker);
+    /// Rebuilds the overlays that are out of date. Call once per frame
+    /// before [`Self::mesh_overlay`] and [`Self::cage_overlay`].
+    pub fn update_overlays(&mut self) {
+        let version = self.doc.mesh().version();
+        let key = (version, self.uv_checker);
         if self.mesh_overlay_key != Some(key) {
             build_mesh_overlay(self.doc.mesh(), self.uv_checker, &mut self.mesh_overlay);
             self.mesh_overlay_key = Some(key);
         }
+        if self.show_cage {
+            let key = (
+                version,
+                self.cage_push().to_bits(),
+                self.imported_cage_generation,
+            );
+            if self.cage_overlay_key != Some(key) {
+                build_cage_overlay(self.doc.mesh(), &self.cage(), &mut self.cage_overlay);
+                self.cage_overlay_key = Some(key);
+            }
+        }
+    }
+
+    /// The mesh as overlay geometry (see [`Self::update_overlays`]).
+    pub fn mesh_overlay(&self) -> &Overlay {
         &self.mesh_overlay
+    }
+
+    /// The cage's wireframe, if it is shown (see [`Self::update_overlays`]).
+    pub fn cage_overlay(&self) -> Option<&Overlay> {
+        self.show_cage.then_some(&self.cage_overlay)
     }
 
     /// Face counts, recounted only when the mesh changed (the panel asks
@@ -134,6 +211,19 @@ impl Retopo {
         }
         self.stats = Some((version, stats));
         stats
+    }
+}
+
+fn build_cage_overlay(mesh: &HalfEdgeMesh, cage: &Cage, out: &mut Overlay) {
+    out.clear();
+    for e in mesh.edges() {
+        let h = e.halfedge(0);
+        let at = |v| cage.position(v).unwrap_or_else(|| mesh.position(v));
+        out.lines.push(OverlayLine {
+            a: at(mesh.origin(h)),
+            b: at(mesh.target(h)),
+            color: CAGE_COLOR,
+        });
     }
 }
 

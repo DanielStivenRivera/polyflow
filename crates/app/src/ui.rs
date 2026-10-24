@@ -105,6 +105,9 @@ pub struct Actions {
     pub save_project_as: bool,
     pub import_retopo: bool,
     pub export_retopo: bool,
+    pub import_cage: bool,
+    pub export_cage: bool,
+    pub clear_cage: bool,
 }
 
 /// Retopology state the UI shows and edits.
@@ -116,6 +119,13 @@ pub struct RetopoUi<'a> {
     pub x_ray: &'a mut bool,
     pub surface_offset: &'a mut f32,
     pub uv_checker: &'a mut bool,
+    pub show_cage: &'a mut bool,
+    /// Push of the automatic cage; `None` for `auto_cage_push`.
+    pub cage_push: &'a mut Option<f32>,
+    pub auto_cage_push: f32,
+    pub scene_radius: f32,
+    /// `Some(fits)` when a cage was imported.
+    pub cage_imported: Option<bool>,
     pub status: &'a mut Option<String>,
     pub undo_name: Option<&'a str>,
     pub redo_name: Option<&'a str>,
@@ -189,6 +199,8 @@ impl UiState {
                     ui.separator();
                     item(ui, "Import retopology OBJ…", "Ctrl+I", &mut actions.import_retopo);
                     item(ui, "Export retopology OBJ…", "Ctrl+E", &mut actions.export_retopo);
+                    item(ui, "Import bake cage OBJ…", "", &mut actions.import_cage);
+                    item(ui, "Export bake cage OBJ…", "", &mut actions.export_cage);
                     ui.separator();
                     if ui.button("Quit").clicked() {
                         actions.quit = true;
@@ -503,6 +515,7 @@ fn retopo_panel(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Acti
         "Shade faces with a checker from their UVs (red along U, green along V). \
          Faces without UVs show in magenta: they will not bake.",
     );
+    cage_section(ui, retopo, actions);
     ui.horizontal(|ui| {
         if ui
             .add_enabled(retopo.undo_name.is_some(), egui::Button::new("Undo"))
@@ -560,6 +573,60 @@ fn retopo_panel(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Acti
                 *retopo.status = None;
             }
         });
+    }
+}
+
+/// The bake cage: shown or not, automatic push, imported cage.
+fn cage_section(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Actions) {
+    ui.horizontal(|ui| {
+        ui.checkbox(retopo.show_cage, "Bake cage").on_hover_text(
+            "Show the envelope bake rays start from. It should enclose the sculpt \
+             without reaching into other parts of it.",
+        );
+        let automatic = retopo.cage_imported != Some(true);
+        ui.add_enabled_ui(automatic, |ui| {
+            let mut push = retopo.cage_push.unwrap_or(retopo.auto_cage_push);
+            let drag = egui::DragValue::new(&mut push)
+                .speed(retopo.scene_radius * 0.0005)
+                .range(0.0..=retopo.scene_radius)
+                .max_decimals(4)
+                .prefix("push ");
+            let hint =
+                "How far the automatic cage is pushed out along the normals, in scene units.";
+            if ui.add(drag).on_hover_text(hint).changed() {
+                *retopo.cage_push = Some(push);
+            }
+            if retopo.cage_push.is_some()
+                && ui
+                    .small_button("Auto")
+                    .on_hover_text("Back to 3% of the sculpt's size.")
+                    .clicked()
+            {
+                *retopo.cage_push = None;
+            }
+        });
+    });
+    match retopo.cage_imported {
+        Some(true) => {
+            ui.horizontal(|ui| {
+                ui.label("Using an imported cage.");
+                if ui.small_button("Use automatic").clicked() {
+                    actions.clear_cage = true;
+                }
+            });
+        }
+        Some(false) => {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "Vertices changed since the cage was imported; using the automatic cage.",
+                );
+                if ui.small_button("Discard").clicked() {
+                    actions.clear_cage = true;
+                }
+            });
+        }
+        None => {}
     }
 }
 

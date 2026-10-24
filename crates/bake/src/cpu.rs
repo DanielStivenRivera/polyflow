@@ -1,10 +1,11 @@
 //! The CPU reference baker: tangent- and object-space normals and ambient
 //! occlusion, projected from the reference mesh onto the low-poly's UVs.
 //!
-//! Projection by ray distance: for each texel, a ray starts
-//! `frontal_distance` in front of the low-poly surface (along its smooth
-//! normal) and travels back through it, up to `rear_distance` behind; the
-//! first reference surface it meets is the one baked. Texels whose ray finds
+//! Projection: for each texel, a ray starts in front of the low-poly
+//! surface and travels back through it, up to `rear_distance` behind; the
+//! first reference surface it meets is the one baked. Without a cage the
+//! ray starts `frontal_distance` out along the smooth normal; with one (see
+//! [`crate::cage`]) it starts at the texel's point on the cage. Texels whose ray finds
 //! nothing are "missed": they get neutral values (flat normal, no occlusion)
 //! and are reported, as they usually mean the distances are too small.
 //!
@@ -50,7 +51,8 @@ pub struct MapSet {
 pub struct BakeSettings {
     pub width: u32,
     pub height: u32,
-    /// How far in front of the low-poly rays start, in scene units.
+    /// How far in front of the low-poly rays start, in scene units. Unused
+    /// with a cage, which says where rays start.
     pub frontal_distance: f32,
     /// How far behind the low-poly rays reach, in scene units.
     pub rear_distance: f32,
@@ -259,15 +261,9 @@ fn bake_row(
         let xi = x as usize;
         let sample = low.sample(t as usize, bary);
         let normal = sample.frame.normal.normalize_or_zero();
-        let hit = (normal != Vec3::ZERO)
-            .then(|| {
-                let origin = sample.position + normal * settings.frontal_distance;
-                let reach = settings.frontal_distance + settings.rear_distance;
-                reference
-                    .bvh
-                    .raycast(reference.mesh, origin, -normal, reach)
-            })
-            .flatten();
+        let hit = ray(low, &sample, normal, settings).and_then(|(origin, dir, reach)| {
+            reference.bvh.raycast(reference.mesh, origin, dir, reach)
+        });
         let Some(hit) = hit else {
             row.coverage[xi] = Coverage::Missed;
             misses += 1;
@@ -295,6 +291,41 @@ fn bake_row(
         }
     }
     (hits, misses)
+}
+
+/// The texel's ray: origin, unit direction and length. From the cage point
+/// through the low-poly point if there is a cage, else along the normal.
+fn ray(
+    low: &BakeMesh,
+    sample: &crate::SurfaceSample,
+    normal: Vec3,
+    settings: &BakeSettings,
+) -> Option<(Vec3, Vec3, f32)> {
+    if low.has_cage {
+        let to_surface = sample.position - sample.cage;
+        let length = to_surface.length();
+        // Where the cage touches the low-poly, start on the surface.
+        if length > 1e-6 * (sample.position.abs().max_element() + 1.0) {
+            return Some((
+                sample.cage,
+                to_surface / length,
+                length + settings.rear_distance,
+            ));
+        }
+        return (normal != Vec3::ZERO).then_some((
+            sample.position,
+            -normal,
+            settings.rear_distance,
+        ));
+    }
+    (normal != Vec3::ZERO).then(|| {
+        let origin = sample.position + normal * settings.frontal_distance;
+        (
+            origin,
+            -normal,
+            settings.frontal_distance + settings.rear_distance,
+        )
+    })
 }
 
 /// A unit vector as a color.
@@ -523,6 +554,42 @@ mod tests {
                 &what,
             );
         }
+    }
+
+    #[test]
+    fn rays_start_from_the_cage() {
+        use crate::cage::Cage;
+        let retopo = uv_grid(4, false);
+        // The reference: a sheet 0.5 below the low-poly, only up to x = 1.75.
+        let high = sheet(-1.0, 1.75, 11, false, |_, _| -0.5);
+        let settings = settings(32, 0.1, 1.0);
+        // 8 texels per unit along x; count the hit columns of row 28, at
+        // y = (1 - 28.5 / 32) * 4 = 0.44, within the sheet.
+        let hit_columns = |baked: &Baked| {
+            (0..32)
+                .filter(|&x| baked.coverage[28 * 32 + x] == Coverage::Hit)
+                .count()
+        };
+
+        // Straight down: texel centers with x < 1.75 hit, (i + 0.5) / 8 < 1.75.
+        let plain = run(&BakeMesh::from_retopo(&retopo), &high, &settings);
+        assert_eq!(hit_columns(&plain), 14);
+        // An automatic cage on a flat low-poly casts the very same rays.
+        let auto = BakeMesh::with_cage(&retopo, Some(&Cage::automatic(&retopo, 0.1)));
+        assert_eq!(run(&auto, &high, &settings), plain);
+
+        // A cage shifted by (0.5, 0, 1): rays slant, crossing z = -0.5 at
+        // x - 0.25, so texels up to x < 2 hit.
+        let shifted: Vec<Vec3> = retopo.vertex_slots().flatten().collect();
+        let mut moved = retopo.clone();
+        let ids: Vec<_> = moved.vertices().collect();
+        for (v, p) in ids.into_iter().zip(shifted) {
+            moved.set_position(v, p + Vec3::new(0.5, 0.0, 1.0));
+        }
+        let cage = Cage::from_mesh(&retopo, &moved).unwrap();
+        let slanted = run(&BakeMesh::with_cage(&retopo, Some(&cage)), &high, &settings);
+        assert_eq!(hit_columns(&slanted), 16);
+        assert_eq!(slanted.misses + slanted.hits, 32 * 32);
     }
 
     #[test]

@@ -16,6 +16,7 @@
 use polyflow_core::glam::{Vec2, Vec3, Vec4};
 use polyflow_core::halfedge::{FaceId, HalfEdgeMesh};
 
+use crate::cage::Cage;
 use crate::tangent::{self, TangentFrame};
 
 /// One corner of a triangle.
@@ -27,6 +28,8 @@ pub struct Corner {
     pub uv: Vec2,
     /// MikkTSpace tangent (unit length) and bitangent sign in `w`.
     pub tangent: Vec4,
+    /// Where rays start, if the mesh has a cage (see [`BakeMesh::has_cage`]).
+    pub cage: Vec3,
 }
 
 /// A point on the low-poly surface, interpolated from a triangle's corners.
@@ -34,6 +37,8 @@ pub struct Corner {
 pub struct SurfaceSample {
     pub position: Vec3,
     pub frame: TangentFrame,
+    /// The matching point on the cage (the position itself without one).
+    pub cage: Vec3,
 }
 
 /// Triangulated low-poly mesh with everything baking needs.
@@ -45,25 +50,38 @@ pub struct BakeMesh {
     pub source_faces: Vec<FaceId>,
     /// Faces left out because some corner has no UV.
     pub faces_without_uvs: usize,
+    /// Whether [`Corner::cage`] holds cage positions.
+    pub has_cage: bool,
 }
 
 impl BakeMesh {
     /// Builds the bake mesh from the retopology. Faces without UVs are left
     /// out (and counted): there is nowhere to bake them to.
     pub fn from_retopo(mesh: &HalfEdgeMesh) -> Self {
+        Self::with_cage(mesh, None)
+    }
+
+    /// Like [`Self::from_retopo`], with rays starting from `cage`. Vertices
+    /// the cage does not cover start from themselves.
+    pub fn with_cage(mesh: &HalfEdgeMesh, cage: Option<&Cage>) -> Self {
         let normals = vertex_normals(mesh);
-        let mut out = BakeMesh::default();
+        let mut out = BakeMesh {
+            has_cage: cage.is_some(),
+            ..BakeMesh::default()
+        };
         let mut polygon: Vec<Corner> = Vec::new();
         for f in mesh.faces() {
             polygon.clear();
             for h in mesh.face_halfedges(f) {
                 let Some(uv) = mesh.uv(h) else { break };
                 let v = mesh.origin(h);
+                let position = mesh.position(v);
                 polygon.push(Corner {
-                    position: mesh.position(v),
+                    position,
                     normal: normals[v.index()],
                     uv,
                     tangent: Vec4::ZERO,
+                    cage: cage.and_then(|c| c.position(v)).unwrap_or(position),
                 });
             }
             if polygon.len() != mesh.face_halfedges(f).count() {
@@ -105,6 +123,7 @@ impl BakeMesh {
                 tangent: tangent.truncate(),
                 sign: if tangent.w < 0.0 { -1.0 } else { 1.0 },
             },
+            cage: mix3(|c| c.cage),
         }
     }
 }
@@ -124,7 +143,7 @@ fn triangulate(polygon: &[Corner]) -> Vec<[usize; 3]> {
 }
 
 /// Angle-weighted smooth normals, indexed by vertex slot.
-fn vertex_normals(mesh: &HalfEdgeMesh) -> Vec<Vec3> {
+pub(crate) fn vertex_normals(mesh: &HalfEdgeMesh) -> Vec<Vec3> {
     let mut normals = vec![Vec3::ZERO; mesh.vertex_slots().count()];
     let mut points: Vec<Vec3> = Vec::new();
     for f in mesh.faces() {
@@ -221,6 +240,7 @@ pub(crate) mod tests {
             normal: Vec3::Z,
             uv: Vec2::ZERO,
             tangent: Vec4::ZERO,
+            cage: Vec3::ZERO,
         };
         // A rhombus whose 1-3 diagonal is the short one.
         let quad = [

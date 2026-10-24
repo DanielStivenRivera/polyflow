@@ -68,6 +68,12 @@ Unsaved work is autosaved every 2 minutes and offered back if Polyflow closes
 unexpectedly. To take the retopology to other software, use **Export
 retopology OBJ** (Ctrl+E); quads stay quads.
 
+The **Bake cage** checkbox shows the envelope bake rays start from: the
+retopology pushed out by *push* (3% of the sculpt's size by default). To shape
+it by hand, use **File → Export bake cage OBJ**, move its vertices in your
+modeling software (do not add, delete or reorder any) and bring it back with
+**Import bake cage OBJ**; it is saved with the project.
+
 The headless `polyflow-cli` loads meshes without a window, which is handy for
 pipelines and for benchmarking:
 
@@ -75,6 +81,7 @@ pipelines and for benchmarking:
 polyflow-cli info path/to/sculpt.obj
 polyflow-cli raster path/to/retopo.obj 4096   # prepare for baking, rasterize the UVs
 polyflow-cli bake sculpt.obj retopo.obj out/character --size 4096
+polyflow-cli bake sculpt.obj retopo.obj out/character --cage character_cage.obj
 ```
 
 ## Documentation

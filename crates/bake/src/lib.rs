@@ -3,6 +3,7 @@
 //!
 //! Contains a CPU reference implementation used to validate the GPU path.
 //!
+//! - [`cage`]: where bake rays start: pushed out automatically or imported.
 //! - [`cpu`]: the CPU reference baker (normals, ambient occlusion).
 //! - [`mesh`]: the low-poly as baked (triangles, normals, MikkTSpace tangents).
 //! - [`raster`]: which triangle covers each texel of a map, and where.
@@ -10,11 +11,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cage;
 pub mod cpu;
 pub mod mesh;
 pub mod raster;
 pub mod tangent;
 
+pub use cage::{Cage, CageMismatch};
 pub use cpu::{
     BakeControl, BakeError, BakeSettings, Baked, Coverage, Map, MapSet, NormalY, Reference, bake,
 };

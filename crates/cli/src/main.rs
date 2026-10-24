@@ -22,6 +22,10 @@ Bake options (distances in scene units; defaults scale with the sculpt):
   --size <px>            Map size (default 2048)
   --distance <d>         Ray reach in front of and behind the retopology (default 3% of the
                          sculpt's bounding radius); --frontal and --rear set them apart
+  --cage <cage.obj>      Start rays from this cage: the retopology as exported by Polyflow,
+                         with vertices moved but none added, removed or reordered
+  --cage-push <d>        Start rays from an automatic cage, the retopology pushed out by d
+                         along its normals
   --ao-samples <n>       Occlusion rays per texel (default 32)
   --ao-distance <d>      Occluders further away are ignored (default 25% of the radius)
   --directx              Green down (-Y) in the tangent-space normal map, for Unreal";
@@ -244,6 +248,8 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
     let mut ao_samples = None;
     let mut ao_distance = None;
     let mut directx = false;
+    let mut cage_path = None;
+    let mut cage_push = None;
     let mut args = options.iter();
     while let Some(&flag) = args.next() {
         let mut number = |name: &str| -> anyhow::Result<f32> {
@@ -269,6 +275,11 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
             "--ao-samples" => ao_samples = Some(number(flag)? as u32),
             "--ao-distance" => ao_distance = Some(number(flag)?),
             "--directx" => directx = true,
+            "--cage" => {
+                let path = args.next().context("--cage needs a file")?;
+                cage_path = Some(PathBuf::from(path));
+            }
+            "--cage-push" => cage_push = Some(number(flag)?),
             other => bail!("unknown bake option `{other}`"),
         }
     }
@@ -293,7 +304,21 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
     let start = Instant::now();
     let imported = polyflow_io::retopo::load(&retopo)
         .with_context(|| format!("loading {}", retopo.display()))?;
-    let low = polyflow_bake::BakeMesh::from_retopo(&imported.mesh);
+    if cage_path.is_some() && cage_push.is_some() {
+        bail!("use either --cage or --cage-push, not both");
+    }
+    let cage = match (&cage_path, cage_push) {
+        (Some(path), _) => {
+            let cage = polyflow_io::retopo::load(path)
+                .with_context(|| format!("loading {}", path.display()))?;
+            let cage = polyflow_bake::Cage::from_mesh(&imported.mesh, &cage.mesh)
+                .with_context(|| format!("{} does not fit the retopology", path.display()))?;
+            Some(cage)
+        }
+        (None, Some(push)) => Some(polyflow_bake::Cage::automatic(&imported.mesh, push)),
+        (None, None) => None,
+    };
+    let low = polyflow_bake::BakeMesh::with_cage(&imported.mesh, cage.as_ref());
     println!(
         "retopology  {} triangles, prepared in {:.2} s",
         low.triangle_count(),
@@ -315,12 +340,14 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
     if directx {
         settings.normal_y = NormalY::DirectX;
     }
+    let start_from = match (&cage_path, cage_push) {
+        (Some(path), _) => format!("from the cage {}", path.display()),
+        (None, Some(push)) => format!("from an automatic cage {push} out"),
+        (None, None) => format!("{} in front", settings.frontal_distance),
+    };
     println!(
-        "settings    {size}x{size}, rays {} in front / {} behind, AO {} rays within {}",
-        settings.frontal_distance,
-        settings.rear_distance,
-        settings.ao_samples,
-        settings.ao_distance
+        "settings    {size}x{size}, rays {start_from} / {} behind, AO {} rays within {}",
+        settings.rear_distance, settings.ao_samples, settings.ao_distance
     );
 
     let start = Instant::now();
