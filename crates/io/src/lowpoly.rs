@@ -3,20 +3,25 @@
 //! A normal map only shades correctly on the triangles, normals and UVs it
 //! was baked for, and engines rebuild MikkTSpace tangents from those. So the
 //! bake also exports its own triangulation with its normals, instead of the
-//! polygons of the retopology.
+//! polygons of the retopology: as OBJ here, and as glTF with the tangents
+//! too in [`crate::gltf::write_glb`].
 
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 
-use polyflow_core::glam::{Vec2, Vec3};
+use polyflow_core::glam::{Vec2, Vec3, Vec4};
 
 /// One corner of a triangle.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MeshCorner {
     pub position: Vec3,
     pub normal: Vec3,
+    /// With V up (OBJ's convention).
     pub uv: Vec2,
+    /// MikkTSpace tangent with its handedness in `w` (OBJ has no place
+    /// for it; glTF does).
+    pub tangent: Vec4,
 }
 
 /// Writes triangles (three corners each) as OBJ with UVs and normals.
@@ -76,20 +81,7 @@ pub fn write_obj(corners: &[MeshCorner], out: impl Write) -> std::io::Result<()>
 
 /// [`write_obj`] to a file, atomically (see [`crate::retopo::save`]).
 pub fn save_obj(path: &Path, corners: &[MeshCorner]) -> std::io::Result<()> {
-    let mut temp = path.as_os_str().to_owned();
-    temp.push(".tmp");
-    let temp = std::path::PathBuf::from(temp);
-    let result = std::fs::File::create(&temp).and_then(|file| {
-        write_obj(corners, &file)?;
-        file.sync_all()
-    });
-    match result.and_then(|()| std::fs::rename(&temp, path)) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&temp);
-            Err(e)
-        }
-    }
+    crate::save_atomically(path, |file| write_obj(corners, file))
 }
 
 #[cfg(test)]
@@ -103,6 +95,7 @@ mod tests {
             position: Vec3::new(x, y, 0.0),
             normal: Vec3::Z,
             uv: Vec2::new(u, y),
+            tangent: Vec4::new(1.0, 0.0, 0.0, 1.0),
         };
         let corners = [
             corner(0.0, 0.0, 0.0),

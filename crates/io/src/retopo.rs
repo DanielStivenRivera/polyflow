@@ -75,20 +75,7 @@ pub fn write_obj(mesh: &HalfEdgeMesh, out: impl Write) -> std::io::Result<()> {
 /// Saves to `path` atomically: the file is written next to it and renamed
 /// into place, so a failure never leaves a truncated file behind.
 pub fn save(path: &Path, mesh: &HalfEdgeMesh) -> std::io::Result<()> {
-    let mut temp = path.as_os_str().to_owned();
-    temp.push(".tmp");
-    let temp = std::path::PathBuf::from(temp);
-    let result = std::fs::File::create(&temp).and_then(|file| {
-        write_obj(mesh, &file)?;
-        file.sync_all()
-    });
-    match result.and_then(|()| std::fs::rename(&temp, path)) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&temp);
-            Err(e)
-        }
-    }
+    crate::save_atomically(path, |file| write_obj(mesh, file))
 }
 
 /// A retopology mesh read from a file.

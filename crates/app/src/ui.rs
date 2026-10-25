@@ -511,7 +511,7 @@ impl UiState {
                         ("Zoom", "Wheel · Ctrl+MMB · Alt+RMB"),
                         ("Frame", "F"),
                         ("Open project", "Ctrl+O · drop a .pflow"),
-                        ("Load sculpt", "Ctrl+L · drop an .obj"),
+                        ("Load sculpt", "Ctrl+L · drop a mesh"),
                         ("Undo / redo", "Ctrl+Z · Ctrl+Y"),
                         ("Save project", "Ctrl+S"),
                         ("Tools", "Q create · D draw · R relax"),

@@ -343,7 +343,7 @@ impl AppState {
                     move |parent| {
                         rfd::FileDialog::new()
                             .set_title(title)
-                            .add_filter("Meshes", &["obj"])
+                            .add_filter("Meshes", polyflow_io::MESH_EXTENSIONS)
                             .set_parent(parent)
                             .pick_file()
                     },

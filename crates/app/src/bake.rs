@@ -223,9 +223,22 @@ fn run(
             position: c.position,
             normal: c.normal,
             uv: c.uv,
+            tangent: c.tangent,
         })
         .collect();
     polyflow_io::lowpoly::save_obj(&path, &corners)
+        .map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+    files.push(path);
+    let map_file = |suffix: &str| {
+        let path = output_file(prefix, suffix, format.extension());
+        files.contains(&path).then_some(path)
+    };
+    let directx = settings.normal_y == NormalY::DirectX;
+    let normal = map_file("normal").filter(|_| !directx);
+    let textures =
+        polyflow_io::gltf::BakedTextures::from_files(normal.as_deref(), map_file("ao").as_deref());
+    let path = output_file(prefix, "low", "glb");
+    polyflow_io::gltf::save_glb(&path, &corners, &textures)
         .map_err(|e| format!("Could not write {}: {e}", path.display()))?;
     files.push(path);
     Ok(Some((files, time, device, baked)))

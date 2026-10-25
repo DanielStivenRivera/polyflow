@@ -33,6 +33,12 @@ All notable changes to Polyflow are documented here. The format follows
   border and snapped to the surface.
 - All of them keep UVs (new corners interpolate them) and follow symmetry.
 
+- **Formats**: sculpts load from PLY (ASCII or binary), glTF 2.0 (`.gltf`
+  or `.glb`) and FBX, besides OBJ. 2M triangles load in a tenth of a second.
+- The bake also writes `<name>_low.glb`: the low-poly as baked with its
+  tangents and UVs, and a material with the normal and AO maps (when they
+  are PNG), ready for engines and glTF viewers.
+
 ### Changed
 
 - Delete removes the selection when there is one. Backspace now dissolves

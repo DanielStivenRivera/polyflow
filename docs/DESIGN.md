@@ -59,8 +59,8 @@ optimization pass.
 
 ### I/O
 
-- Import: OBJ, PLY (v0.1); FBX, glTF, USD (later)
-- Export mesh: OBJ (v0.1); FBX, glTF, USD (later)
+- Import: OBJ (v0.1); PLY, glTF, FBX (v0.3); USD (later)
+- Export mesh: OBJ (v0.1); glTF (v0.3, the low-poly as baked); FBX, USD (later)
 - Export maps: PNG, TGA, EXR
 - Native project format (versioned) and a fast binary cache for reference meshes
 
@@ -210,7 +210,7 @@ undo step and respects symmetry.
    the selection.
 3. ✅ Building tools: extrude borders along the surface, bridge two loops, fill
    holes (with a quad grid where the border allows), tweak/move brush.
-4. Formats: glTF 2.0 import of sculpts and export of the low-poly as baked
+4. ✅ Formats: glTF 2.0 import of sculpts and export of the low-poly as baked
    (normals, tangents, UVs); FBX import through `ufbx`; PLY import. FBX
    export waits for a solid open-source writer.
 5. Sculpt cache: a binary cache of the prepared sculpt (mesh, meshlets,
@@ -269,6 +269,22 @@ slight preference for square grids. Inner vertices come from a Coons patch
 of the four sides, then snap to the surface. With symmetry, a hole that is
 its own mirror image only takes a grid whose corners map onto themselves,
 and a hole on one side gets the mirror image of the other side's grid.
+
+### Formats
+
+PLY (ASCII and binary) and glTF are read by Polyflow's own parsers, which
+check every count, offset and index against the data, so malformed files are
+errors and never crashes or huge allocations. glTF meshes are placed by
+their nodes' transforms (mirroring transforms flip the triangles back);
+buffers come from the GLB, `data:` URIs or files next to the `.gltf`, never
+from other folders. Draco and meshopt compression are not supported. FBX goes
+through ufbx, a C library built for untrusted input, converted to Y-up.
+
+The low-poly as baked is also written as GLB: indexed triangles with normals,
+MikkTSpace tangents and UVs (V flipped, since glTF's runs down; the tangent
+frame on the surface is unchanged, which is what glTF and OpenGL-style normal
+maps expect), and a material referencing the PNG maps. A DirectX-style normal
+map is not referenced, since glTF expects green up.
 
 Left for v0.4: height, cavity, curvature and ID maps; batch baking and
 Python bindings. UV unwrapping stays an open question.

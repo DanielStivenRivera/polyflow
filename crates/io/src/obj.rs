@@ -13,6 +13,8 @@ use polyflow_core::glam::Vec3;
 use polyflow_core::mesh::TriMesh;
 use rayon::prelude::*;
 
+use crate::Geometry;
+
 /// Target chunk size for parallel parsing.
 const CHUNK_BYTES: usize = 4 << 20;
 
@@ -26,34 +28,12 @@ pub enum ObjError {
     TooLarge,
 }
 
-/// Geometry parsed from an OBJ file, before normals are computed.
-#[derive(Debug, Default)]
-pub struct ObjGeometry {
-    pub positions: Vec<Vec3>,
-    pub indices: Vec<u32>,
-    /// Faces with fewer than three vertices, which were skipped.
-    pub skipped_faces: usize,
-}
-
-impl ObjGeometry {
-    /// Converts into a mesh, computing smooth vertex normals.
-    pub fn into_mesh(self) -> TriMesh {
-        let mut mesh = TriMesh {
-            positions: self.positions,
-            normals: vec![],
-            indices: self.indices,
-        };
-        mesh.compute_normals();
-        mesh
-    }
-}
-
 /// Parses OBJ data. Never panics on malformed input.
-pub fn parse(bytes: &[u8]) -> Result<ObjGeometry, ObjError> {
+pub fn parse(bytes: &[u8]) -> Result<Geometry, ObjError> {
     parse_with_chunk_size(bytes, CHUNK_BYTES)
 }
 
-fn parse_with_chunk_size(bytes: &[u8], chunk_bytes: usize) -> Result<ObjGeometry, ObjError> {
+fn parse_with_chunk_size(bytes: &[u8], chunk_bytes: usize) -> Result<Geometry, ObjError> {
     let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
     let ranges = split_at_lines(bytes, chunk_bytes);
     let chunks: Vec<Chunk> = ranges
@@ -184,7 +164,7 @@ fn continue_line(line_start: &mut usize, line_end: usize) {
     *line_start = line_end + 1;
 }
 
-fn merge(chunks: Vec<Chunk>) -> Result<ObjGeometry, ObjError> {
+fn merge(chunks: Vec<Chunk>) -> Result<Geometry, ObjError> {
     let mut vertex_offsets = Vec::with_capacity(chunks.len());
     let (mut vertex_count, mut index_count) = (0usize, 0usize);
     for chunk in &chunks {
@@ -229,7 +209,7 @@ fn merge(chunks: Vec<Chunk>) -> Result<ObjGeometry, ObjError> {
             Ok(())
         })?;
 
-    Ok(ObjGeometry {
+    Ok(Geometry {
         positions,
         indices,
         skipped_faces: chunks.iter().map(|c| c.skipped_faces).sum(),
@@ -332,7 +312,7 @@ mod tests {
 
     use super::*;
 
-    fn parse_str(s: &str) -> Result<ObjGeometry, ObjError> {
+    fn parse_str(s: &str) -> Result<Geometry, ObjError> {
         parse(s.as_bytes())
     }
 

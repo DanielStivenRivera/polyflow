@@ -41,7 +41,7 @@ rebuild shaders, which otherwise come precompiled.
 
 ## Usage
 
-Load a reference mesh (`.obj` for now) with **File → Load reference mesh**
+Load a reference mesh (OBJ, PLY, glTF/GLB or FBX) with **File → Load reference mesh**
 (Ctrl+L), by dropping it on the window, or from the command line:
 
 ```sh
@@ -106,9 +106,10 @@ and look a set distance behind it; if the panel reports many missed texels,
 raise those distances. When the bake finishes, the viewport previews the
 low-poly with its maps.
 
-Next to the maps, the bake writes `<name>_low.obj`: the low-poly triangulated
-and with the normals it was baked with. Use that mesh in your engine with the
-maps, so the normal map shades as baked.
+Next to the maps, the bake writes `<name>_low.obj` and `<name>_low.glb`: the
+low-poly triangulated and with the normals it was baked with (the glTF also
+carries the MikkTSpace tangents, and a material using the PNG maps). Use that
+mesh in your engine with the maps, so the normal map shades as baked.
 
 The headless `polyflow-cli` loads meshes without a window, which is handy for
 pipelines and for benchmarking:

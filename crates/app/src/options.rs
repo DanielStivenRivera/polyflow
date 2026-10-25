@@ -7,7 +7,7 @@ pub const USAGE: &str = "\
 Usage: polyflow [OPTIONS] [MESH]
 
 Arguments:
-  [MESH]               Reference mesh to open (.obj)
+  [MESH]               Reference mesh to open (.obj, .ply, .gltf, .glb, .fbx)
 
 Options:
   --torus <RINGS>      Start with a test torus of 2*RINGS*(RINGS/2) triangles

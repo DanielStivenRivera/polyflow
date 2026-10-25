@@ -623,7 +623,7 @@ impl AppState {
             |parent| {
                 rfd::FileDialog::new()
                     .set_title("Open reference mesh")
-                    .add_filter("Meshes", &["obj"])
+                    .add_filter("Meshes", polyflow_io::MESH_EXTENSIONS)
                     .add_filter("All files", &["*"])
                     .set_parent(parent)
                     .pick_file()

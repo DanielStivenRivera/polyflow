@@ -8,17 +8,19 @@ use anyhow::{Context as _, bail};
 
 const USAGE: &str = "\
 Usage:
-  polyflow-cli info <mesh.obj>             Load a mesh and print statistics and timings
-  polyflow-cli bvh <mesh.obj>              Build the BVH and time raycasts and closest-point queries
+  polyflow-cli info <mesh>                 Load a mesh (.obj, .ply, .gltf, .glb, .fbx) and print
+                                           statistics and timings
+  polyflow-cli bvh <mesh>                  Build the BVH and time raycasts and closest-point queries
   polyflow-cli torus <rings> <out.obj>     Write a test torus with 2*rings*(rings/2) triangles
   polyflow-cli raster <retopo.obj> [size]  Prepare a retopology for baking and rasterize its UVs
                                            at size x size (default 4096), printing timings
-  polyflow-cli bake <sculpt.obj> <retopo.obj> <out> [options]
+  polyflow-cli bake <sculpt> <retopo.obj> <out> [options]
                                            Bake normal maps and ambient occlusion from the sculpt
                                            onto the retopology's UVs with the CPU reference baker,
                                            writing <out>_normal, <out>_object and <out>_ao, and
                                            <out>_low.obj: the retopology as baked (triangulated,
-                                           with normals), the mesh to use the maps with
+                                           with normals), the mesh to use the maps with, and
+                                           <out>_low.glb: the same with tangents and the maps
 
 Bake options (distances in scene units; defaults scale with the sculpt):
   --size <px>            Map size (default 2048)
@@ -459,6 +461,7 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
         ("object", &baked.object_normal),
         ("ao", &baked.ambient_occlusion),
     ];
+    let mut written: Vec<(&str, std::path::PathBuf)> = Vec::new();
     for (suffix, map) in maps {
         let Some(map) = map else { continue };
         let mut name = out.file_name().unwrap_or_default().to_owned();
@@ -474,6 +477,7 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
         )
         .with_context(|| format!("writing {}", path.display()))?;
         println!("wrote       {}", path.display());
+        written.push((suffix, path));
     }
     let mut name = out.file_name().unwrap_or_default().to_owned();
     name.push("_low.obj");
@@ -485,12 +489,29 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
             position: c.position,
             normal: c.normal,
             uv: c.uv,
+            tangent: c.tangent,
         })
         .collect();
     polyflow_io::lowpoly::save_obj(&path, &corners)
         .with_context(|| format!("writing {}", path.display()))?;
     println!(
         "wrote       {} (use the maps with this mesh)",
+        path.display()
+    );
+    let map = |suffix: &str| {
+        written
+            .iter()
+            .find(|(s, _)| *s == suffix)
+            .map(|(_, p)| p.as_path())
+    };
+    let directx = settings.normal_y == polyflow_bake::NormalY::DirectX;
+    let textures =
+        polyflow_io::gltf::BakedTextures::from_files(map("normal").filter(|_| !directx), map("ao"));
+    let path = path.with_extension("glb");
+    polyflow_io::gltf::save_glb(&path, &corners, &textures)
+        .with_context(|| format!("writing {}", path.display()))?;
+    println!(
+        "wrote       {} (the same, as glTF with tangents and the maps)",
         path.display()
     );
     Ok(())
