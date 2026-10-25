@@ -12,6 +12,7 @@ mod modal;
 mod options;
 mod project;
 mod retopo;
+mod sculpt_cache;
 mod ui;
 
 use std::path::{Path, PathBuf};
@@ -604,8 +605,8 @@ impl AppState {
         );
         self.mesh_info = info;
         self.reference_path = prepared.source_path;
-        self.mesh = Arc::new(prepared.mesh);
-        self.bvh = Arc::new(prepared.bvh);
+        self.mesh = prepared.mesh;
+        self.bvh = prepared.bvh;
         self.retopo.scene_radius = self.mesh.bounds().radius().max(1e-6);
         self.hover = None;
         match self.pending_camera.take() {
@@ -822,6 +823,12 @@ impl AppState {
             Some(SelectAction::Loops) => self.tools.grow_loops(&mut self.retopo, false),
             Some(SelectAction::Rings) => self.tools.grow_loops(&mut self.retopo, true),
             None => {}
+        }
+        if actions.clear_cache {
+            self.tools.status = Some(match sculpt_cache::clear() {
+                Ok(()) => "Sculpt cache cleared".into(),
+                Err(e) => format!("Could not clear the sculpt cache: {e}"),
+            });
         }
         if let Some(command) = actions.command {
             let input = tool_input!(self);

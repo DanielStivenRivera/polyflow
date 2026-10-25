@@ -5,6 +5,7 @@
 //! array (children are addressed relative to their parent), and the pieces
 //! are copied once into the final array.
 
+use bytemuck::{Pod, Zeroable};
 use polyflow_core::bounds::Aabb;
 use polyflow_core::glam::Vec3;
 use polyflow_core::mesh::TriMesh;
@@ -35,8 +36,9 @@ pub const STACK_SIZE: usize = MAX_SAH_DEPTH + 40;
 /// A node in depth-first order. Internal nodes have their left child right
 /// after them and their right child at `self + index`; leaves (`count > 0`)
 /// own `triangles[index..index + count]`.
-#[derive(Debug, Clone, Copy)]
-struct Node {
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub struct Node {
     min: Vec3,
     index: u32,
     max: Vec3,
@@ -70,6 +72,9 @@ impl Node {
         }
     }
 }
+
+/// A node of a [`Bvh`], as stored by [`Bvh::parts`].
+pub type BvhNode = Node;
 
 /// A BVH over a [`TriMesh`]. Queries take the mesh it was built from.
 #[derive(Debug, Default)]
@@ -149,6 +154,65 @@ impl Bvh {
         let mut nodes = vec![Node::leaf(Aabb::EMPTY, 0, 0); tree.len()];
         tree.write_into(&mut nodes);
         Self { nodes, triangles }
+    }
+
+    /// The nodes and the triangle order, to store and rebuild the hierarchy
+    /// with [`Self::from_parts`].
+    pub fn parts(&self) -> (&[BvhNode], &[u32]) {
+        (&self.nodes, &self.triangles)
+    }
+
+    /// Rebuilds a hierarchy from [`Self::parts`] (e.g. read from a cache),
+    /// checking that it is well formed for a mesh of `triangle_count`
+    /// triangles, so queries on it cannot go out of bounds or overflow
+    /// their stack.
+    pub fn from_parts(
+        nodes: Vec<BvhNode>,
+        triangles: Vec<u32>,
+        triangle_count: usize,
+    ) -> Result<Self, String> {
+        if triangles.len() != triangle_count {
+            return Err("the triangle order does not match the mesh".into());
+        }
+        if triangles.iter().any(|&t| t as usize >= triangle_count) {
+            return Err("a triangle id is out of range".into());
+        }
+        if nodes.is_empty() != (triangle_count == 0) {
+            return Err("the hierarchy does not match the mesh".into());
+        }
+        // Children come after their parent, so one forward pass sees every
+        // node's depth before its children.
+        let mut depth = vec![0u32; nodes.len()];
+        if let Some(d) = depth.first_mut() {
+            *d = 1;
+        }
+        for (i, node) in nodes.iter().enumerate() {
+            let d = depth[i];
+            if d == 0 {
+                return Err(format!("node {i} is not reachable"));
+            }
+            if d as usize > STACK_SIZE {
+                return Err("the hierarchy is too deep".into());
+            }
+            if node.count > 0 {
+                let end = node.index as usize + node.count as usize;
+                if end > triangles.len() {
+                    return Err(format!("leaf {i} runs past the triangles"));
+                }
+                continue;
+            }
+            let (left, right) = (i + 1, i + node.index as usize);
+            if node.index < 2 || right >= nodes.len() {
+                return Err(format!("node {i} has invalid children"));
+            }
+            for child in [left, right] {
+                if depth[child] != 0 {
+                    return Err(format!("node {child} has two parents"));
+                }
+                depth[child] = d + 1;
+            }
+        }
+        Ok(Self { nodes, triangles })
     }
 
     pub fn node_count(&self) -> usize {
@@ -719,6 +783,45 @@ mod tests {
         fn vec3(&mut self, scale: f32) -> Vec3 {
             Vec3::new(self.next_f32(), self.next_f32(), self.next_f32()) * 2.0 * scale - scale
         }
+    }
+
+    #[test]
+    fn parts_round_trip_and_are_checked() {
+        let mesh = torus(1.0, 0.3, 64, 32);
+        let bvh = Bvh::build(&mesh);
+        let (nodes, triangles) = bvh.parts();
+        let count = mesh.triangle_count();
+        let back = Bvh::from_parts(nodes.to_vec(), triangles.to_vec(), count).unwrap();
+        let (origin, dir) = (Vec3::new(3.0, 0.1, 0.2), Vec3::NEG_X);
+        assert_eq!(
+            back.raycast(&mesh, origin, dir, f32::INFINITY),
+            bvh.raycast(&mesh, origin, dir, f32::INFINITY)
+        );
+
+        let broken = |edit: &dyn Fn(&mut Vec<BvhNode>, &mut Vec<u32>)| {
+            let (mut n, mut t) = (nodes.to_vec(), triangles.to_vec());
+            edit(&mut n, &mut t);
+            Bvh::from_parts(n, t, count)
+        };
+        assert!(broken(&|_, t| t.truncate(10)).is_err());
+        assert!(broken(&|_, t| t[3] = count as u32).is_err());
+        assert!(broken(&|n, _| n[0].index = 1).is_err());
+        assert!(broken(&|n, _| n[0].index = u32::MAX).is_err());
+        let leaf = nodes.iter().position(|n| n.count > 0).unwrap();
+        assert!(broken(&|n, _| n[leaf].count = u32::MAX).is_err());
+        // A tree deeper than the traversal stack.
+        let len = 2 * STACK_SIZE + 3;
+        let chain: Vec<BvhNode> = (0..len)
+            .map(|i| {
+                if i % 2 == 0 && i + 2 < len {
+                    Node::internal(Aabb::EMPTY, 2)
+                } else {
+                    Node::leaf(Aabb::EMPTY, 0, 1)
+                }
+            })
+            .collect();
+        assert!(Bvh::from_parts(chain, vec![0], 1).is_err());
+        assert!(Bvh::from_parts(Vec::new(), Vec::new(), 0).is_ok());
     }
 
     fn triangle_soup(count: usize, rng: &mut Rng) -> TriMesh {

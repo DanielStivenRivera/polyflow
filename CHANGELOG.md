@@ -39,6 +39,10 @@ All notable changes to Polyflow are documented here. The format follows
   tangents and UVs, and a material with the normal and AO maps (when they
   are PNG), ready for engines and glTF viewers.
 
+- **Sculpt cache**: a prepared sculpt is cached, so it reopens almost at
+  once: 10M triangles in 0.13 s instead of 2 s. The cache follows changes to
+  the file, keeps up to 8 GB, and can be cleared from the File menu.
+
 ### Changed
 
 - Delete removes the selection when there is one. Backspace now dissolves

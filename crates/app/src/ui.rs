@@ -43,7 +43,14 @@ impl MeshInfo {
 #[derive(Debug, Clone)]
 pub enum MeshSource {
     File(FileInfo),
-    Generated { time: Duration },
+    /// Read from the sculpt cache (a cache file of this size).
+    Cache {
+        bytes: u64,
+        read: Duration,
+    },
+    Generated {
+        time: Duration,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +122,7 @@ pub struct Actions {
     pub cancel_bake: bool,
     pub choose_bake_output: bool,
     pub select: Option<SelectAction>,
+    pub clear_cache: bool,
     pub command: Option<Command>,
 }
 
@@ -238,6 +246,17 @@ impl UiState {
                     item(ui, "Save project as…", "Ctrl+Shift+S", &mut actions.save_project_as);
                     ui.separator();
                     item(ui, "Load reference mesh…", "Ctrl+L", &mut actions.open_file);
+                    // Only scanned while the menu is open.
+                    let cached = crate::sculpt_cache::size();
+                    let label = format!("Clear sculpt cache ({})", format_bytes(cached));
+                    let hint = "Prepared sculpts are cached so they reopen in a moment.                         The cache keeps the most recently used, up to 8 GB.";
+                    if ui
+                        .add_enabled(cached > 0, egui::Button::new(label))
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        actions.clear_cache = true;
+                    }
                     ui.separator();
                     item(ui, "Import retopology OBJ…", "Ctrl+I", &mut actions.import_retopo);
                     item(ui, "Export retopology OBJ…", "Ctrl+E", &mut actions.export_retopo);
@@ -372,6 +391,13 @@ impl UiState {
                         if file.skipped_faces > 0 {
                             row(ui, "Skipped faces", &group_thousands(file.skipped_faces));
                         }
+                    }
+                    MeshSource::Cache { bytes, read } => {
+                        row(
+                            ui,
+                            "From cache",
+                            &format!("{} in {}", format_bytes(*bytes), format_duration(*read)),
+                        );
                     }
                     MeshSource::Generated { time } => row(ui, "Generate", &format_duration(*time)),
                 }

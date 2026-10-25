@@ -22,7 +22,7 @@ mesh and writes the results into textures.
 crates/
 ├─ core     polyflow-core     math, half-edge mesh, commands / undo
 ├─ spatial  polyflow-spatial  BVH, raycast, closest-point queries
-├─ io       polyflow-io       importers, exporters, binary cache
+├─ io       polyflow-io       importers, exporters, binary cache files
 ├─ bake     polyflow-bake     baking (CPU reference + GPU)
 ├─ render   polyflow-render   Vulkan renderer (ash)
 ├─ app      polyflow          UI, retopo tools, viewport → binary `polyflow`

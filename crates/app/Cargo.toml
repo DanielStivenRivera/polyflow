@@ -20,6 +20,7 @@ egui.workspace = true
 egui-winit.workspace = true
 rfd.workspace = true
 dirs.workspace = true
+bytemuck.workspace = true
 log.workspace = true
 env_logger.workspace = true
 anyhow.workspace = true

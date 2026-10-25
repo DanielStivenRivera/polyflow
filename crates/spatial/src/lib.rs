@@ -9,4 +9,4 @@
 mod bvh;
 pub mod triangle;
 
-pub use bvh::{Bvh, ClosestPoint, RayHit, STACK_SIZE};
+pub use bvh::{Bvh, BvhNode, ClosestPoint, RayHit, STACK_SIZE};

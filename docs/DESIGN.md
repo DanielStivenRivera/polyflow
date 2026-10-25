@@ -132,7 +132,7 @@ Reference hardware: mid-range desktop GPU (e.g. RTX 3060 / RX 6600 class),
 | Metric | Budget |
 |---|---|
 | Import 10M-triangle OBJ | < 3 s |
-| Reopen 10M triangles from cache | < 0.5 s |
+| Reopen 10M triangles from cache | < 0.5 s (0.13 s) |
 | Viewport, 50M triangles | ≥ 60 fps |
 | Snap query (single point) | < 1 ms |
 | Retopo edit operation | < 16 ms (one frame) |
@@ -213,7 +213,7 @@ undo step and respects symmetry.
 4. ✅ Formats: glTF 2.0 import of sculpts and export of the low-poly as baked
    (normals, tangents, UVs); FBX import through `ufbx`; PLY import. FBX
    export waits for a solid open-source writer.
-5. Sculpt cache: a binary cache of the prepared sculpt (mesh, meshlets,
+5. ✅ Sculpt cache: a binary cache of the prepared sculpt (mesh, meshlets,
    BVH) so 10M triangles reopen within the 0.5 s budget.
 6. Hard edges in bakes: normals split at UV island borders or at marked
    edges, baked and exported that way in the low-poly.
@@ -285,6 +285,25 @@ MikkTSpace tangents and UVs (V flipped, since glTF's runs down; the tangent
 frame on the surface is unchanged, which is what glTF and OpenGL-style normal
 maps expect), and a material referencing the PNG maps. A DirectX-style normal
 map is not referenced, since glTF expects green up.
+
+### Sculpt cache
+
+Preparing a sculpt (reading its file, clusterizing meshlets, building the
+BVH) takes about 2 s for 10M triangles; the cache keeps the result, so the
+same sculpt reopens in about 0.13 s (90 ms to read 500 MB, plus the GPU
+upload). One file per sculpt in the user's cache folder, named by a hash of
+the sculpt's path, holds the mesh, the meshlets and the BVH as raw arrays
+(`polyflow-io::cache`), each aligned and read straight into its final
+memory, in parallel; the GPU vertex layout is cheap and is rebuilt instead
+of stored. It is used while the sculpt's size and modification time match
+and the same Polyflow version wrote it (preparation can change between
+versions). It is written in the background after the sculpt is shown, and
+the least recently used files go beyond 8 GB.
+
+A cache file is checked like any input: sections against the file size,
+then every index and range of the mesh, meshlets and BVH (including its
+depth against the traversal stack), so a damaged file is dropped and the
+sculpt prepared again, never a crash.
 
 Left for v0.4: height, cavity, curvature and ID maps; batch baking and
 Python bindings. UV unwrapping stays an open question.

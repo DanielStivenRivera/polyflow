@@ -50,7 +50,7 @@ struct PackedVertex {
 /// Must match `Meshlet` in `shaders/cull.slang` (std430, 48 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable, PartialEq)]
-struct GpuMeshlet {
+pub struct GpuMeshlet {
     center: [f32; 3],
     radius: f32,
     cone_axis: [f32; 3],
@@ -103,15 +103,7 @@ impl MeshData {
     /// Packs vertices and splits the mesh into meshlets, in parallel.
     pub fn build(mesh: &TriMesh) -> Self {
         let start = Instant::now();
-        let vertices: Vec<PackedVertex> = mesh
-            .positions
-            .par_iter()
-            .zip(&mesh.normals)
-            .map(|(p, &n)| PackedVertex {
-                position: p.to_array(),
-                normal: encode_octahedral(n),
-            })
-            .collect();
+        let vertices = pack_vertices(mesh);
 
         let positions: &[u8] = bytemuck::cast_slice(&mesh.positions);
         let blocks: Vec<(Vec<u32>, Vec<GpuMeshlet>)> = mesh
@@ -157,6 +149,45 @@ impl MeshData {
         }
     }
 
+    /// The meshlets and their indices, to store and rebuild the layout with
+    /// [`Self::from_parts`] without clusterizing again.
+    pub fn parts(&self) -> (&[u32], &[GpuMeshlet]) {
+        (&self.indices, &self.meshlets)
+    }
+
+    /// Rebuilds the layout of `mesh` from [`Self::parts`] (e.g. read from a
+    /// cache), checking that every index and meshlet is in range.
+    pub fn from_parts(
+        mesh: &TriMesh,
+        indices: Vec<u32>,
+        meshlets: Vec<GpuMeshlet>,
+    ) -> Result<Self, String> {
+        let start = Instant::now();
+        if mesh.normals.len() != mesh.positions.len() {
+            return Err("the mesh has no normals".into());
+        }
+        if indices.len() != mesh.indices.len() {
+            return Err("the meshlets do not cover the mesh".into());
+        }
+        let vertex_count = mesh.positions.len();
+        if indices.par_iter().any(|&i| i as usize >= vertex_count) {
+            return Err("a meshlet index is out of range".into());
+        }
+        let in_range = |m: &GpuMeshlet| {
+            m.index_count.is_multiple_of(3)
+                && m.first_index as usize + m.index_count as usize <= indices.len()
+        };
+        if !meshlets.iter().all(in_range) {
+            return Err("a meshlet is out of range".into());
+        }
+        Ok(Self {
+            vertices: pack_vertices(mesh),
+            indices,
+            meshlets,
+            build_time: start.elapsed(),
+        })
+    }
+
     pub fn meshlet_count(&self) -> usize {
         self.meshlets.len()
     }
@@ -164,6 +195,17 @@ impl MeshData {
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
     }
+}
+
+fn pack_vertices(mesh: &TriMesh) -> Vec<PackedVertex> {
+    mesh.positions
+        .par_iter()
+        .zip(&mesh.normals)
+        .map(|(p, &n)| PackedVertex {
+            position: p.to_array(),
+            normal: encode_octahedral(n),
+        })
+        .collect()
 }
 
 /// Clusterizes one block of triangles. Returned `first_index` values are
@@ -750,6 +792,23 @@ mod tests {
             let decoded = decode_octahedral(encode_octahedral(n));
             assert!(decoded.dot(n) > 0.99999, "{n} -> {decoded}");
         }
+    }
+
+    #[test]
+    fn parts_round_trip_and_are_checked() {
+        let mesh = torus(1.0, 0.3, 64, 32);
+        let data = MeshData::build(&mesh);
+        let (indices, meshlets) = data.parts();
+        let back = MeshData::from_parts(&mesh, indices.to_vec(), meshlets.to_vec()).unwrap();
+        assert_eq!(back.vertices, data.vertices);
+        assert_eq!(back.meshlets, data.meshlets);
+        let mut bad = indices.to_vec();
+        bad[5] = mesh.positions.len() as u32;
+        assert!(MeshData::from_parts(&mesh, bad, meshlets.to_vec()).is_err());
+        let mut bad = meshlets.to_vec();
+        bad[0].index_count = u32::MAX;
+        assert!(MeshData::from_parts(&mesh, indices.to_vec(), bad).is_err());
+        assert!(MeshData::from_parts(&mesh, indices[3..].to_vec(), meshlets.to_vec()).is_err());
     }
 
     #[test]

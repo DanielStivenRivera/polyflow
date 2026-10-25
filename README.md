@@ -48,6 +48,10 @@ Load a reference mesh (OBJ, PLY, glTF/GLB or FBX) with **File → Load reference
 polyflow path/to/sculpt.obj
 ```
 
+Polyflow caches each sculpt as prepared for display, so opening it again
+(directly or with its project) takes a fraction of a second. **File → Clear
+sculpt cache** frees the space.
+
 Navigation follows Blender or Maya conventions: orbit with MMB or Alt+LMB, pan
 with Shift+MMB or Alt+MMB, zoom with the wheel, Ctrl+MMB or Alt+RMB, and press
 F to frame the mesh.

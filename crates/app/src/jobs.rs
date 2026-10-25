@@ -2,6 +2,7 @@
 //! mesh and building its GPU layout, which can take seconds for huge meshes.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use polyflow_core::mesh::TriMesh;
@@ -9,6 +10,7 @@ use polyflow_core::primitives;
 use polyflow_render::MeshData;
 use polyflow_spatial::Bvh;
 
+use crate::sculpt_cache;
 use crate::ui::{FileInfo, MeshInfo, MeshSource};
 
 #[derive(Debug, Clone)]
@@ -32,13 +34,38 @@ impl Job {
 pub struct Prepared {
     /// The file the mesh came from (`None` for generated meshes).
     pub source_path: Option<PathBuf>,
-    pub mesh: TriMesh,
-    pub gpu_data: MeshData,
-    pub bvh: Bvh,
+    pub mesh: Arc<TriMesh>,
+    pub gpu_data: Arc<MeshData>,
+    pub bvh: Arc<Bvh>,
     pub info: MeshInfo,
 }
 
 pub fn run(job: &Job) -> Result<Prepared, String> {
+    if let Job::Open(path) = job
+        && let Some(cached) = sculpt_cache::load(path)
+    {
+        let info = MeshInfo {
+            name: display_name(path),
+            vertices: cached.mesh.vertex_count(),
+            triangles: cached.mesh.triangle_count(),
+            meshlets: cached.gpu_data.meshlet_count(),
+            source: MeshSource::Cache {
+                bytes: cached.bytes,
+                read: cached.read,
+            },
+            meshlet_build: cached.gpu_data.build_time,
+            bvh_build: Duration::ZERO,
+            bvh_bytes: cached.bvh.memory_bytes(),
+            upload: Duration::ZERO,
+        };
+        return Ok(Prepared {
+            source_path: Some(path.clone()),
+            mesh: Arc::new(cached.mesh),
+            gpu_data: Arc::new(cached.gpu_data),
+            bvh: Arc::new(cached.bvh),
+            info,
+        });
+    }
     let (mesh, name, source) = match job {
         Job::Open(path) => {
             let loaded = polyflow_io::load_mesh(path)
@@ -94,6 +121,16 @@ pub fn run(job: &Job) -> Result<Prepared, String> {
         Job::Open(path) => Some(path.clone()),
         Job::Torus { .. } => None,
     };
+    let (mesh, gpu_data, bvh) = (Arc::new(mesh), Arc::new(gpu_data), Arc::new(bvh));
+    // Caching takes a moment for huge meshes: do it while the mesh is shown.
+    if let Some(path) = &source_path {
+        sculpt_cache::save_in_background(
+            path.clone(),
+            Arc::clone(&mesh),
+            Arc::clone(&gpu_data),
+            Arc::clone(&bvh),
+        );
+    }
     Ok(Prepared {
         source_path,
         mesh,
