@@ -458,7 +458,7 @@ impl HalfEdgeMesh {
 
     /// Replaces faces: removes `remove`, then adds `add` with their corner
     /// UVs. Vertices of removed faces that end up without edges are removed.
-    fn rebuild(
+    pub(super) fn rebuild(
         &mut self,
         remove: &[FaceId],
         add: Vec<Vec<Corner>>,
@@ -517,7 +517,7 @@ impl HalfEdgeMesh {
         Ok(added)
     }
 
-    fn check_halfedge(&self, h: HalfEdgeId) -> Result<(), TopologyError> {
+    pub(super) fn check_halfedge(&self, h: HalfEdgeId) -> Result<(), TopologyError> {
         if self.contains_halfedge(h) {
             Ok(())
         } else {

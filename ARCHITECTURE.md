@@ -46,6 +46,8 @@ make the mesh non-manifold.
 Higher-level edits (`split_edge`, `merge_vertices`, `dissolve_faces`,
 `insert_loop`, ... in `halfedge/topology.rs`) are built on those two: they
 remove the faces they touch and add the replacements, keeping corner UVs.
+Extrude, bridge and fill (`halfedge/build.rs`) add faces along border
+half-edges the same way.
 
 In the app, edits go through `Retopo::edit`, which also keeps the selection
 (`retopo/selection.rs`) to the elements the edit did not remove or rebuild,

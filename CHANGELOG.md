@@ -25,6 +25,12 @@ All notable changes to Polyflow are documented here. The format follows
 - **Cut** tool (C): click on edges one after another to cut across faces.
 - Dropping a vertex on another while moving it (Ctrl+drag in Create) welds
   them, in the same undo step as the move.
+- **Extrude** tool (E): drag border edges out along the surface into a new
+  row of quads; the new border stays selected for the next row.
+- **Tweak** tool (W): a brush that drags the retopology along the surface.
+- **Bridge** (B) two selected borders with a row of quads, and **fill** (H)
+  holes: with a grid of quads when the border allows, placed to fit the
+  border and snapped to the surface.
 - All of them keep UVs (new corners interpolate them) and follow symmetry.
 
 ### Changed

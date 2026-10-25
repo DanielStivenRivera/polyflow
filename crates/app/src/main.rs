@@ -490,6 +490,8 @@ impl AppState {
             Some("r") if !ctrl => self.tools.select(ToolKind::Relax),
             Some("i") if !ctrl => self.tools.select(ToolKind::Loop),
             Some("c") if !ctrl => self.tools.select(ToolKind::Cut),
+            Some("e") if !ctrl => self.tools.select(ToolKind::Extrude),
+            Some("w") if !ctrl => self.tools.select(ToolKind::Tweak),
             Some("x") if !ctrl => {
                 self.retopo.symmetry_axis = match self.retopo.symmetry_axis {
                     Some(Axis::X) => None,

@@ -88,8 +88,22 @@ pub fn edge(
     radius: f32,
     x_ray: bool,
 ) -> Option<EdgeId> {
+    edge_where(mesh, surface, view, cursor, radius, x_ray, |_| true)
+}
+
+/// [`edge`], among the edges that `keep` accepts.
+pub fn edge_where(
+    mesh: &HalfEdgeMesh,
+    surface: &Surface<'_>,
+    view: &ViewInfo,
+    cursor: Vec2,
+    radius: f32,
+    x_ray: bool,
+    keep: impl Fn(EdgeId) -> bool,
+) -> Option<EdgeId> {
     let mut candidates: Vec<(f32, EdgeId, Vec3)> = mesh
         .edges()
+        .filter(|&e| keep(e))
         .filter_map(|e| {
             let h = e.halfedge(0);
             let (a, b) = (mesh.position(mesh.origin(h)), mesh.position(mesh.target(h)));

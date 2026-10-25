@@ -208,7 +208,7 @@ undo step and respects symmetry.
 2. ✅ Topology operations: weld/merge vertices, insert edge loop (with preview
    and slide), cut faces, dissolve vertices and edges, rotate edge, delete
    the selection.
-3. Building tools: extrude borders along the surface, bridge two loops, fill
+3. ✅ Building tools: extrude borders along the surface, bridge two loops, fill
    holes (with a quad grid where the border allows), tweak/move brush.
 4. Formats: glTF 2.0 import of sculpts and export of the low-poly as baked
    (normals, tangents, UVs); FBX import through `ufbx`; PLY import. FBX
@@ -251,6 +251,24 @@ across a ring that is its own mirror image the other way round is inserted in
 the middle, the only place that keeps it symmetric. Edits that free element
 slots can hand them to new elements, so the selection drops edges and faces
 whose vertices changed in an edit.
+
+### Building from borders
+
+Extrude, bridge and fill (`polyflow-core::halfedge::build`) add faces along
+boundary half-edges, in their direction, so new faces are oriented like their
+neighbors. Extrusion pushes each border vertex along the surface, across the
+border and away from its faces (averaged over its border edges, weighted by
+length), then snaps it. Bridging walks the second border backwards, since
+facing borders run opposite ways; closed borders are lined up where their
+vertices are closest.
+
+A hole with an even number of edges is filled with a grid: four corners
+split its border into opposite sides of equal length, chosen where the
+border turns closest to a right angle and runs straightest elsewhere, with a
+slight preference for square grids. Inner vertices come from a Coons patch
+of the four sides, then snap to the surface. With symmetry, a hole that is
+its own mirror image only takes a grid whose corners map onto themselves,
+and a hole on one side gets the mirror image of the other side's grid.
 
 Left for v0.4: height, cavity, curvature and ID maps; batch baking and
 Python bindings. UV unwrapping stays an open question.

@@ -277,7 +277,7 @@ fn op() -> impl Strategy<Value = Op> {
         1 => any::<usize>().prop_map(Op::RemoveFace),
         1 => any::<usize>().prop_map(Op::RemoveVertex),
         1 => (any::<usize>(), any::<[i8; 3]>()).prop_map(|(v, d)| Op::Move(v, d)),
-        3 => (0u8..8, any::<usize>(), any::<usize>()).prop_map(|(kind, a, b)| Op::Topology(kind, a, b)),
+        3 => (0u8..10, any::<usize>(), any::<usize>()).prop_map(|(kind, a, b)| Op::Topology(kind, a, b)),
         2 => Just(Op::Undo),
         1 => Just(Op::Redo),
     ]
@@ -337,6 +337,10 @@ proptest! {
                     let face = mesh.faces().nth(a % mesh.face_count().max(1));
                     let t = (b % 7) as f32 / 6.0;
                     let second = mesh.faces().nth(b % mesh.face_count().max(1));
+                    let border = edge.filter(|&h| mesh.is_boundary_halfedge(h));
+                    let fill_corners = border
+                        .and_then(|h| mesh.grid_fill_corners(h).first().copied())
+                        .filter(|_| b % 2 == 0);
                     let face_pair = face.and_then(|f| {
                         let corners = mesh.face_corners(f);
                         (corners.len() > 3).then(|| (f, corners[0].vertex, corners[2].vertex))
@@ -351,6 +355,12 @@ proptest! {
                         4 => edge.map(|h| doc.edit("Dissolve edge", |m| m.dissolve_edges(&[h.edge()]))),
                         5 => edge.map(|h| doc.edit("Rotate edge", |m| m.rotate_edge(h.edge(), b % 2 == 0).map(|_| ()))),
                         6 => edge.map(|h| doc.edit("Insert loop", |m| m.insert_loop(h, t).map(|_| ()))),
+                        8 => border.map(|h| {
+                            doc.edit("Extrude", |m| {
+                                m.extrude_border(&[h], |v| Vec3::new(v.0 as f32, 0.0, 1.0)).map(|_| ())
+                            })
+                        }),
+                        9 => border.map(|h| doc.edit("Fill", |m| m.fill_hole(h, fill_corners).map(|_| ()))),
                         _ => face.zip(second).map(|(f, g)| {
                             doc.edit("Dissolve faces", |m| m.dissolve_faces(&[f, g]).map(|_| ()))
                         }),
@@ -792,4 +802,158 @@ fn insert_loops() {
     assert_eq!(mesh.insert_loop(h, 0.5).unwrap().len(), 4);
     mesh.validate().unwrap();
     assert_eq!((mesh.vertex_count(), mesh.face_count()), (12, 10));
+}
+
+#[test]
+fn extrude_and_bridge_borders() {
+    let n = 2;
+    let (mut mesh, cells) = grid(n);
+    add_all(&mut mesh, &cells);
+    // The bottom border, pushed down.
+    let bottom: Vec<EdgeId> = (0..n)
+        .map(|i| {
+            mesh.find_halfedge(at(n, i, 0), at(n, i + 1, 0))
+                .unwrap()
+                .edge()
+        })
+        .collect();
+    let chains = mesh.border_chains(&bottom);
+    assert_eq!(chains.len(), 1);
+    assert_eq!(chains[0].len(), 2);
+    assert!(!mesh.is_closed_chain(&chains[0]));
+    let copies = mesh
+        .extrude_border(&chains[0], mesh_position_below)
+        .unwrap();
+    mesh.validate().unwrap();
+    assert_eq!(copies.len(), 3);
+    assert_eq!((mesh.vertex_count(), mesh.face_count()), (12, 6));
+
+    // Two separate rows of quads, bridged across the gap between them.
+    let (mut mesh, cells) = grid(3);
+    let rows: Vec<[VertexId; 4]> = cells[..3].iter().chain(&cells[6..]).copied().collect();
+    add_all(&mut mesh, &rows);
+    let lower: Vec<EdgeId> = (0..3)
+        .map(|i| {
+            mesh.find_halfedge(at(3, i, 1), at(3, i + 1, 1))
+                .unwrap()
+                .edge()
+        })
+        .collect();
+    let upper: Vec<EdgeId> = (0..3)
+        .map(|i| {
+            mesh.find_halfedge(at(3, i, 2), at(3, i + 1, 2))
+                .unwrap()
+                .edge()
+        })
+        .collect();
+    let (a, b) = (mesh.border_chains(&lower), mesh.border_chains(&upper));
+    mesh.bridge(&a[0], &b[0]).unwrap();
+    mesh.validate().unwrap();
+    assert_eq!(mesh.face_count(), 9);
+    assert_eq!(boundary_vertices(&mesh), 12, "one border all around");
+    // Unequal borders are refused.
+    let (mut mesh, cells) = grid(3);
+    let partial: Vec<[VertexId; 4]> = cells[..3].iter().chain(&cells[6..8]).copied().collect();
+    add_all(&mut mesh, &partial);
+    let row_edges = |mesh: &HalfEdgeMesh, j: usize, count: usize| -> Vec<EdgeId> {
+        (0..count)
+            .map(|i| {
+                mesh.find_halfedge(at(3, i, j), at(3, i + 1, j))
+                    .unwrap()
+                    .edge()
+            })
+            .collect()
+    };
+    let (a, b) = (
+        mesh.border_chains(&row_edges(&mesh, 1, 3)),
+        mesh.border_chains(&row_edges(&mesh, 2, 2)),
+    );
+    assert!(mesh.bridge(&a[0], &b[0]).is_err());
+}
+
+fn mesh_position_below(v: VertexId) -> Vec3 {
+    Vec3::new(v.0 as f32, -1.0, 0.0)
+}
+
+#[test]
+fn closed_borders_bridge_and_holes_fill() {
+    // A 4x4 grid without its middle 2x2: a hole of 8 edges.
+    let n = 4;
+    let (mut mesh, cells) = grid(n);
+    let outer: Vec<[VertexId; 4]> = cells
+        .iter()
+        .enumerate()
+        .filter(|(k, _)| !matches!(k, 5 | 6 | 9 | 10))
+        .map(|(_, c)| *c)
+        .collect();
+    add_all(&mut mesh, &outer);
+    mesh.remove_vertex(at(n, 2, 2)).unwrap();
+    let h = mesh.find_halfedge(at(n, 1, 1), at(n, 2, 1)).unwrap();
+    assert!(mesh.is_boundary_halfedge(h));
+    let corners = mesh.grid_fill_corners(h);
+    let best = corners[0];
+    let mut expected = [at(n, 1, 1), at(n, 3, 1), at(n, 3, 3), at(n, 1, 3)];
+    let mut got = best;
+    expected.sort_unstable();
+    got.sort_unstable();
+    assert_eq!(got, expected, "corners where the border turns");
+    let inner = mesh.fill_hole(h, Some(best)).unwrap();
+    mesh.validate().unwrap();
+    assert_eq!(inner.len(), 1);
+    assert!((mesh.position(inner[0]) - Vec3::new(2.0, 2.0, 0.0)).length() < 1e-5);
+    assert_eq!(mesh.face_count(), 16);
+    assert_eq!(boundary_vertices(&mesh), 16);
+
+    // Odd holes take one polygon.
+    let (mut mesh, _) = grid(1);
+    let v: Vec<VertexId> = mesh.vertices().collect();
+    mesh.add_face(&[v[0], v[1], v[3]]).unwrap();
+    let h = mesh.find_halfedge(v[1], v[0]).unwrap();
+    assert!(mesh.grid_fill_corners(h).is_empty());
+    mesh.fill_hole(h, None).unwrap();
+    mesh.validate().unwrap();
+    assert_eq!(mesh.face_count(), 2);
+
+    // Two closed borders: the ends of an open tube, bridged into a closed
+    // ring. Squares at z = 0 and z = 1, with a strip of quads on z = 0..1
+    // missing: bridging the strip's borders closes the tube.
+    let mut mesh = HalfEdgeMesh::new();
+    let ring = |mesh: &mut HalfEdgeMesh, z: f32| -> Vec<VertexId> {
+        [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+            .iter()
+            .map(|&(x, y)| mesh.add_vertex(Vec3::new(x, y, z)))
+            .collect()
+    };
+    let (r0, r1, r2) = (
+        ring(&mut mesh, 0.0),
+        ring(&mut mesh, 1.0),
+        ring(&mut mesh, 2.0),
+    );
+    for k in 0..4 {
+        let k1 = (k + 1) % 4;
+        mesh.add_face(&[r0[k], r0[k1], r1[k1], r1[k]]).unwrap();
+    }
+    // A separate band further along, facing the same way.
+    let r3 = ring(&mut mesh, 3.0);
+    for k in 0..4 {
+        let k1 = (k + 1) % 4;
+        mesh.add_face(&[r2[k], r2[k1], r3[k1], r3[k]]).unwrap();
+    }
+    let edges = |r: &[VertexId]| -> Vec<EdgeId> {
+        (0..4)
+            .map(|k| mesh.find_halfedge(r[k], r[(k + 1) % 4]).unwrap().edge())
+            .collect()
+    };
+    let (a, b) = (
+        mesh.border_chains(&edges(&r1)),
+        mesh.border_chains(&edges(&r2)),
+    );
+    assert!(mesh.is_closed_chain(&a[0]) && mesh.is_closed_chain(&b[0]));
+    mesh.bridge(&a[0], &b[0]).unwrap();
+    mesh.validate().unwrap();
+    assert_eq!(mesh.face_count(), 12);
+    // Lined up with matching corners: bridge edges are all straight.
+    for k in 0..4 {
+        assert!(mesh.find_halfedge(r1[k], r2[k]).is_some());
+    }
 }

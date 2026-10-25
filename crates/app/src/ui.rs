@@ -556,6 +556,15 @@ fn retopo_panel(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Acti
                     .text("Width (px)"),
             );
         }
+        ToolKind::Extrude => {
+            ui.weak("Drag a border edge away from the faces to extrude it along the surface. Selected border edges extrude together; Shift takes the whole border.");
+        }
+        ToolKind::Tweak => {
+            ui.add(
+                egui::Slider::new(&mut retopo.settings.brush_radius, 10.0..=400.0)
+                    .text("Radius (px)"),
+            );
+        }
         ToolKind::Relax => {
             ui.add(
                 egui::Slider::new(&mut retopo.settings.brush_radius, 10.0..=400.0)
@@ -964,6 +973,18 @@ fn select_section(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Ac
             "Turn the selected edges to join the next vertices around their faces (T)",
             Command::Rotate,
         );
+        button(
+            ui,
+            "Bridge",
+            "Join two selected borders with a row of quads; they need as many edges (B)",
+            Command::Bridge,
+        );
+        button(
+            ui,
+            "Fill",
+            "Fill the holes along the selected border edges, with a grid of quads when the border has an even number of edges (H)",
+            Command::Fill,
+        );
     });
 }
 
@@ -977,6 +998,10 @@ fn tool_help(tool: ToolKind) -> &'static str {
         ToolKind::Relax => "Drag to smooth the retopo mesh, keeping it on the surface",
         ToolKind::Loop => "Insert an edge loop across a ring of quads",
         ToolKind::Cut => "Cut faces by clicking on their edges",
+        ToolKind::Extrude => "Extrude border edges along the surface",
+        ToolKind::Tweak => {
+            "Drag to move the retopo mesh under the brush, keeping it on the surface"
+        }
     }
 }
 

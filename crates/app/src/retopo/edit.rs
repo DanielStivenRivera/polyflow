@@ -1,7 +1,7 @@
 //! Retopology edits that honor symmetry. Run them inside
 //! `MeshDocument::edit` so each user action is one atomic undo step.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use polyflow_core::glam::Vec3;
 use polyflow_core::halfedge::{EdgeId, FaceId, HalfEdgeId, HalfEdgeMesh, TopologyError, VertexId};
@@ -451,6 +451,177 @@ pub fn insert_loop(
     Ok(new)
 }
 
+/// `edges` with their mirror images.
+pub fn edges_with_mirrors(
+    mesh: &HalfEdgeMesh,
+    symmetry: Option<&Symmetry>,
+    edges: &[EdgeId],
+) -> Vec<EdgeId> {
+    let mut all = edges.to_vec();
+    if let Some(sym) = symmetry {
+        all.extend(
+            edges
+                .iter()
+                .filter_map(|&e| mirror_halfedge(mesh, sym, e.halfedge(0)).map(|h| h.edge())),
+        );
+    }
+    all.sort_unstable();
+    all.dedup();
+    all
+}
+
+/// Extrudes border half-edges to `positions` (one per vertex on them; see
+/// `HalfEdgeMesh::extrude_border`). With symmetry the half-edges should
+/// include their mirror images; copies of mirror partners are made exact
+/// reflections, and copies of seam vertices stay on the seam. Returns the
+/// copy of each vertex.
+pub fn extrude(
+    mesh: &mut HalfEdgeMesh,
+    symmetry: Option<&Symmetry>,
+    halfedges: &[HalfEdgeId],
+    positions: &HashMap<VertexId, Vec3>,
+) -> Result<HashMap<VertexId, VertexId>, TopologyError> {
+    let partners: HashMap<VertexId, VertexId> = match symmetry {
+        Some(sym) => positions
+            .keys()
+            .filter_map(|&v| sym.partner(mesh, v).map(|p| (v, p)))
+            .collect(),
+        None => HashMap::new(),
+    };
+    let copies = mesh.extrude_border(halfedges, |v| positions[&v])?;
+    if let Some(sym) = symmetry {
+        let axis = sym.axis.index();
+        for (&v, &copy) in &copies {
+            match partners.get(&v) {
+                Some(&p) if p == v => {
+                    let mut q = mesh.position(copy);
+                    q[axis] = 0.0;
+                    mesh.set_position(copy, q);
+                }
+                // The copy on the positive side leads.
+                Some(p) if mesh.position(v)[axis] > 0.0 => {
+                    if let Some(&mirror) = copies.get(p) {
+                        mesh.set_position(mirror, sym.reflect(mesh.position(copy)));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(copies)
+}
+
+/// Bridges the two borders that `edges` make up (and their mirror images).
+pub fn bridge(
+    mesh: &mut HalfEdgeMesh,
+    symmetry: Option<&Symmetry>,
+    edges: &[EdgeId],
+) -> Result<(), TopologyError> {
+    let chains = mesh.border_chains(edges);
+    let [a, b] = &chains[..] else {
+        return Err(TopologyError::Refused(
+            "select the edges of exactly two borders to bridge",
+        ));
+    };
+    let edge_set =
+        |chain: &[HalfEdgeId]| -> Vec<EdgeId> { chain.iter().map(|h| h.edge()).collect() };
+    let mirrors = symmetry.map(|sym| {
+        let mirror = |chain: &[HalfEdgeId]| edges_with_mirrors(mesh, Some(sym), &edge_set(chain));
+        (mirror(a), mirror(b))
+    });
+    mesh.bridge(a, b)?;
+    let Some((ma, mb)) = mirrors else {
+        return Ok(());
+    };
+    // The mirror borders, unless the borders are their own mirror images.
+    let selected: HashSet<EdgeId> = edges.iter().copied().collect();
+    let (ma, mb): (Vec<EdgeId>, Vec<EdgeId>) = (
+        ma.into_iter().filter(|e| !selected.contains(e)).collect(),
+        mb.into_iter().filter(|e| !selected.contains(e)).collect(),
+    );
+    if ma.is_empty() || mb.is_empty() {
+        return Ok(());
+    }
+    let (ca, cb) = (mesh.border_chains(&ma), mesh.border_chains(&mb));
+    if let ([a], [b]) = (&ca[..], &cb[..]) {
+        mesh.bridge(a, b)?;
+    }
+    Ok(())
+}
+
+/// Fills the holes along `edges` (and their mirror images), with grids of
+/// quads where the borders allow. Returns the new inner vertices.
+pub fn fill_holes(
+    mesh: &mut HalfEdgeMesh,
+    symmetry: Option<&Symmetry>,
+    edges: &[EdgeId],
+) -> Result<Vec<VertexId>, TopologyError> {
+    // One border half-edge per hole.
+    let mut holes: Vec<HalfEdgeId> = Vec::new();
+    let mut seen: HashSet<HalfEdgeId> = HashSet::new();
+    for &e in edges {
+        for h in [e.halfedge(0), e.halfedge(1)] {
+            if mesh.contains_halfedge(h) && mesh.is_boundary_halfedge(h) && !seen.contains(&h) {
+                seen.extend(mesh.loop_from(h));
+                holes.push(h);
+            }
+        }
+    }
+    if holes.is_empty() {
+        return Err(TopologyError::Refused(
+            "select edges on the border of a hole",
+        ));
+    }
+    let mut inner = Vec::new();
+    let mut filled: HashSet<HalfEdgeId> = HashSet::new();
+    for h in holes {
+        if filled.contains(&h) || !mesh.contains_halfedge(h) || !mesh.is_boundary_halfedge(h) {
+            continue;
+        }
+        let ring: Vec<VertexId> = mesh.loop_from(h).map(|h| mesh.origin(h)).collect();
+        let candidates = mesh.grid_fill_corners(h);
+        let Some(sym) = symmetry else {
+            inner.extend(mesh.fill_hole(h, candidates.first().copied())?);
+            continue;
+        };
+        let partner_corners = |mesh: &HalfEdgeMesh, c: [VertexId; 4]| -> Option<[VertexId; 4]> {
+            let p: Option<Vec<VertexId>> = c.iter().map(|&v| sym.partner(mesh, v)).collect();
+            p?.try_into().ok()
+        };
+        let mirror_hole = ring
+            .iter()
+            .find_map(|&v| sym.partner(mesh, v))
+            .and_then(|p| {
+                mesh.outgoing_halfedges(p)
+                    .find(|&o| mesh.is_boundary_halfedge(o))
+            })
+            .filter(|&m| mesh.loop_from(m).count() == ring.len());
+        let self_mirror = mirror_hole.is_some_and(|m| mesh.loop_from(m).any(|x| x == h));
+        if self_mirror || mirror_hole.is_none() {
+            // A grid that maps onto itself, if there is one.
+            let symmetric = candidates
+                .iter()
+                .copied()
+                .find(|&c| partner_corners(mesh, c).is_some_and(|p| same_set(&p, &c)));
+            let corners = if self_mirror {
+                symmetric
+            } else {
+                candidates.first().copied()
+            };
+            inner.extend(mesh.fill_hole(h, corners)?);
+            continue;
+        }
+        let m = mirror_hole.expect("checked above");
+        filled.extend(mesh.loop_from(m));
+        let corners = candidates.first().copied();
+        let mirrored = corners.and_then(|c| partner_corners(mesh, c));
+        inner.extend(mesh.fill_hole(h, corners)?);
+        // The mirror hole's border half-edge is untouched by the first fill.
+        inner.extend(mesh.fill_hole(m, mirrored)?);
+    }
+    Ok(inner)
+}
+
 fn remove_vertex_and_strays(mesh: &mut HalfEdgeMesh, v: VertexId) -> Result<(), TopologyError> {
     // Every vertex of the surrounding faces, not just edge neighbors: the
     // opposite corner of a quad can be left alone too.
@@ -532,19 +703,25 @@ mod tests {
 
     /// A 4x2 grid of quads across the X mirror plane, facing +Z.
     fn mirrored_grid(sym: &Symmetry) -> (HalfEdgeMesh, Vec<VertexId>) {
+        sized_mirrored_grid(sym, 4, 2)
+    }
+
+    /// `w` x `h` unit quads centered on the X mirror plane (`w` even), with
+    /// vertices numbered row by row.
+    fn sized_mirrored_grid(sym: &Symmetry, w: usize, h: usize) -> (HalfEdgeMesh, Vec<VertexId>) {
         let mut mesh = HalfEdgeMesh::new();
-        let ids: Vec<VertexId> = (0..15)
+        let ids: Vec<VertexId> = (0..(w + 1) * (h + 1))
             .map(|k| {
-                let (i, j) = ((k % 5) as f32, (k / 5) as f32);
-                add_vertex(&mut mesh, Some(sym), Vec3::new(i - 2.0, j, 0.0))
+                let (i, j) = ((k % (w + 1)) as f32, (k / (w + 1)) as f32);
+                add_vertex(&mut mesh, Some(sym), Vec3::new(i - w as f32 / 2.0, j, 0.0))
             })
             .collect();
-        for j in 0..2 {
-            for i in 0..4 {
-                let k = j * 5 + i;
+        for j in 0..h {
+            for i in 0..w {
+                let k = j * (w + 1) + i;
                 add_face_facing(
                     &mut mesh,
-                    &[ids[k], ids[k + 1], ids[k + 6], ids[k + 5]],
+                    &[ids[k], ids[k + 1], ids[k + w + 2], ids[k + w + 1]],
                     Vec3::Z,
                 )
                 .unwrap();
@@ -624,6 +801,51 @@ mod tests {
         dissolve_selection(&mut mesh, Some(&sym), &selection).unwrap();
         mesh.validate().unwrap();
         assert_eq!(mesh.face_count(), 6, "two pairs of quads merged");
+        assert!(is_symmetric(&mesh, &sym));
+    }
+
+    #[test]
+    fn symmetric_building() {
+        let sym = Symmetry::new(Axis::X, 2.0);
+        // Extrude the bottom border of the grid (across the seam) down.
+        let (mut mesh, ids) = mirrored_grid(&sym);
+        let bottom: Vec<EdgeId> = (0..4)
+            .map(|i| mesh.find_halfedge(ids[i + 1], ids[i]).unwrap().edge())
+            .collect();
+        let halfedges: Vec<HalfEdgeId> = mesh.border_chains(&bottom).concat();
+        // Slightly asymmetric positions: extrusion makes them exact.
+        let positions: HashMap<VertexId, Vec3> = (0..5)
+            .map(|i| {
+                (
+                    ids[i],
+                    mesh.position(ids[i]) - Vec3::new(0.001 * i as f32, 1.0, 0.0),
+                )
+            })
+            .collect();
+        extrude(&mut mesh, Some(&sym), &halfedges, &positions).unwrap();
+        mesh.validate().unwrap();
+        assert_eq!(mesh.face_count(), 12);
+        assert!(is_symmetric(&mesh, &sym));
+
+        // Cut a hole of 1x2 quads on each side and fill both.
+        let sym = Symmetry::new(Axis::X, 3.0);
+        let (mut mesh, ids) = sized_mirrored_grid(&sym, 6, 4);
+        // Cells (1, 1) and (1, 2): x from -2 to -1, y from 1 to 3.
+        for k in [8, 15] {
+            let f = mesh
+                .vertex_faces(ids[k])
+                .find(|&f| mesh.face_vertices(f).any(|v| v == ids[k + 8]));
+            remove_face(&mut mesh, Some(&sym), f.unwrap()).unwrap();
+        }
+        let faces = mesh.face_count();
+        let e = mesh.find_halfedge(ids[8], ids[9]).unwrap().edge();
+        fill_holes(&mut mesh, Some(&sym), &[e]).unwrap();
+        mesh.validate().unwrap();
+        assert_eq!(
+            mesh.face_count(),
+            faces + 4,
+            "a grid of two quads on each side"
+        );
         assert!(is_symmetric(&mesh, &sym));
     }
 

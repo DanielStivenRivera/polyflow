@@ -38,13 +38,17 @@ pub enum ToolKind {
     Relax,
     Loop,
     Cut,
+    Extrude,
+    Tweak,
 }
 
 impl ToolKind {
-    pub const ALL: [ToolKind; 6] = [
+    pub const ALL: [ToolKind; 8] = [
         ToolKind::Select,
         ToolKind::Create,
         ToolKind::Draw,
+        ToolKind::Extrude,
+        ToolKind::Tweak,
         ToolKind::Relax,
         ToolKind::Loop,
         ToolKind::Cut,
@@ -58,6 +62,8 @@ impl ToolKind {
             ToolKind::Relax => "Relax",
             ToolKind::Loop => "Loop",
             ToolKind::Cut => "Cut",
+            ToolKind::Extrude => "Extrude",
+            ToolKind::Tweak => "Tweak",
         }
     }
 
@@ -69,6 +75,8 @@ impl ToolKind {
             ToolKind::Relax => "R",
             ToolKind::Loop => "I",
             ToolKind::Cut => "C",
+            ToolKind::Extrude => "E",
+            ToolKind::Tweak => "W",
         }
     }
 }
@@ -86,6 +94,22 @@ pub enum Command {
     Connect,
     /// Rotate the selected edges (T).
     Rotate,
+    /// Bridge the two selected borders (B).
+    Bridge,
+    /// Fill the holes along the selected border edges (H).
+    Fill,
+}
+
+/// An extrusion being dragged out.
+#[derive(Debug, Clone)]
+struct Extrusion {
+    halfedges: Vec<HalfEdgeId>,
+    /// Unit direction, along the surface and away from the faces, per vertex.
+    directions: HashMap<VertexId, Vec3>,
+    /// Surface point where the drag started, and the direction measured along.
+    start: Vec3,
+    axis: Vec3,
+    distance: f32,
 }
 
 /// Everything a tool needs to know about the frame.
@@ -160,6 +184,21 @@ pub struct Tools {
     even: bool,
     /// Cut: the vertex the next cut starts from.
     cut_from: Option<VertexId>,
+    /// Extrude: the extrusion being dragged.
+    extrusion: Option<Extrusion>,
+    /// Tweak: the brush stroke in progress.
+    tweak: Option<Tweak>,
+}
+
+/// A Tweak brush stroke.
+#[derive(Debug, Clone)]
+struct Tweak {
+    /// Vertices under the brush when it went down, with their positions then
+    /// and their weights.
+    vertices: Vec<(VertexId, Vec3, f32)>,
+    /// The surface point the brush went down on.
+    start: Vec3,
+    gesture: u64,
 }
 
 impl Default for Tools {
@@ -187,6 +226,8 @@ impl Default for Tools {
             loop_at: None,
             even: false,
             cut_from: None,
+            extrusion: None,
+            tweak: None,
         }
     }
 }
@@ -214,6 +255,8 @@ impl Tools {
             || self.brushing.is_some()
             || self.region.is_some()
             || self.sliding.is_some()
+            || self.extrusion.is_some()
+            || self.tweak.is_some()
     }
 
     /// Abandons the current gesture or face in progress.
@@ -222,10 +265,12 @@ impl Tools {
             || self.drawing
             || self.region.is_some()
             || self.sliding.is_some()
-            || self.cut_from.is_some();
+            || self.cut_from.is_some()
+            || self.extrusion.is_some();
         self.pending.clear();
         self.sliding = None;
         self.cut_from = None;
+        self.extrusion = None;
         self.stroke.clear();
         self.drawing = false;
         self.region = None;
@@ -239,7 +284,9 @@ impl Tools {
         input: &ToolInput<'_>,
         cursor_in_viewport: bool,
     ) -> Option<(Vec2, f32)> {
-        (self.active == ToolKind::Relax && (cursor_in_viewport || self.brushing.is_some()))
+        let brush = matches!(self.active, ToolKind::Relax | ToolKind::Tweak);
+        let down = self.brushing.is_some() || self.tweak.is_some();
+        (brush && (cursor_in_viewport || down))
             .then_some((input.cursor, self.settings.brush_radius))
     }
 
@@ -265,7 +312,7 @@ impl Tools {
                 SelectMode::Edge => (false, true, false),
                 SelectMode::Face => (false, false, true),
             },
-            ToolKind::Loop => (false, true, false),
+            ToolKind::Loop | ToolKind::Extrude => (false, true, false),
             ToolKind::Cut => (true, true, false),
             _ => (true, false, true),
         };
@@ -281,14 +328,16 @@ impl Tools {
         } else {
             None
         };
+        let borders_only = self.active == ToolKind::Extrude;
         self.hover_edge = if edges && self.hover_vertex.is_none() {
-            pick::edge(
+            pick::edge_where(
                 mesh,
                 &input.surface,
                 &input.view,
                 input.cursor,
                 PICK_RADIUS,
                 retopo.x_ray,
+                |e| !borders_only || mesh.is_boundary_edge(e),
             )
         } else {
             None
@@ -352,6 +401,14 @@ impl Tools {
                 self.sliding = self.loop_at.map(|(h, _)| h);
                 true
             }
+            (ToolKind::Extrude, MouseButton::Left) => {
+                self.start_extrusion(retopo, input);
+                true
+            }
+            (ToolKind::Tweak, MouseButton::Left) => {
+                self.start_tweak(retopo, input);
+                true
+            }
             (_, MouseButton::Left | MouseButton::Right) => {
                 self.press = Some((button, input.cursor));
                 true
@@ -361,6 +418,18 @@ impl Tools {
     }
 
     pub fn mouse_move(&mut self, retopo: &mut Retopo, input: &ToolInput<'_>) {
+        if let Some(extrusion) = &mut self.extrusion {
+            if let Some(hit) = input.surface.raycast(&input.view, input.cursor) {
+                extrusion.distance = (hit.position - extrusion.start)
+                    .dot(extrusion.axis)
+                    .max(0.0);
+            }
+            return;
+        }
+        if self.tweak.is_some() {
+            self.tweak_under_brush(retopo, input);
+            return;
+        }
         if let Some(h) = self.sliding {
             if !retopo.mesh().contains_halfedge(h) {
                 self.sliding = None;
@@ -435,6 +504,15 @@ impl Tools {
             }
             if self.sliding.take().is_some() {
                 self.insert_loop(retopo, input);
+                self.update_hover(retopo, input);
+                return;
+            }
+            if let Some(extrusion) = self.extrusion.take() {
+                self.finish_extrusion(retopo, input, extrusion);
+                self.update_hover(retopo, input);
+                return;
+            }
+            if self.tweak.take().is_some() {
                 self.update_hover(retopo, input);
                 return;
             }
@@ -522,6 +600,14 @@ impl Tools {
             }
             Some("t") => {
                 self.run(retopo, input, Command::Rotate);
+                return true;
+            }
+            Some("b") if !input.modifiers.control_key() => {
+                self.run(retopo, input, Command::Bridge);
+                return true;
+            }
+            Some("h") => {
+                self.run(retopo, input, Command::Fill);
                 return true;
             }
             _ => {}
@@ -625,6 +711,34 @@ impl Tools {
                 }
                 result.map(|_| ())
             }
+            Command::Bridge | Command::Fill => {
+                let mesh = retopo.mesh();
+                let mut edges: Vec<EdgeId> = selection
+                    .edges_for_loops(mesh)
+                    .into_iter()
+                    .filter(|&e| mesh.is_boundary_edge(e))
+                    .collect();
+                if edges.is_empty() && command == Command::Fill {
+                    edges.extend(self.hover_edge.filter(|&e| mesh.is_boundary_edge(e)));
+                }
+                if edges.is_empty() {
+                    self.status = Some(match command {
+                        Command::Bridge => "Select the edges of two borders to bridge".into(),
+                        _ => "Select an edge on the border of the hole to fill".into(),
+                    });
+                    return false;
+                }
+                if command == Command::Bridge {
+                    retopo.edit("Bridge", |m| edit::bridge(m, sym, &edges))
+                } else {
+                    let surface = input.surface;
+                    retopo.edit("Fill hole", |m| {
+                        let inner = edit::fill_holes(m, sym, &edges)?;
+                        snap_vertices(m, sym, &surface, &inner);
+                        Ok(())
+                    })
+                }
+            }
         };
         self.report(result);
         self.update_hover(retopo, input);
@@ -716,6 +830,154 @@ impl Tools {
                 retopo.x_ray,
             )
         })
+    }
+
+    // ---- Extrude -----------------------------------------------------------
+
+    /// Starts dragging out the border edges under the cursor: the selected
+    /// border edges if the hovered one is among them, the hovered edge's
+    /// whole border with Shift, else just the hovered edge.
+    fn start_extrusion(&mut self, retopo: &mut Retopo, input: &ToolInput<'_>) {
+        let mesh = retopo.mesh();
+        let Some(hovered) = self.hover_edge.filter(|&e| mesh.is_boundary_edge(e)) else {
+            return;
+        };
+        let Some(hit) = input.surface.raycast(&input.view, input.cursor) else {
+            return;
+        };
+        let selection = &retopo.selection;
+        let mut edges: Vec<EdgeId> =
+            if selection.mode() == SelectMode::Edge && selection.edges().contains(&hovered) {
+                selection
+                    .edges()
+                    .iter()
+                    .copied()
+                    .filter(|&e| mesh.is_boundary_edge(e))
+                    .collect()
+            } else if input.modifiers.shift_key() {
+                mesh.edge_loop(hovered)
+            } else {
+                vec![hovered]
+            };
+        let symmetry = retopo.symmetry();
+        edges = edit::edges_with_mirrors(mesh, symmetry.as_ref(), &edges);
+        let halfedges: Vec<HalfEdgeId> = mesh.border_chains(&edges).concat();
+        let directions = border_directions(mesh, &input.surface, &halfedges);
+        let border = [hovered.halfedge(0), hovered.halfedge(1)]
+            .into_iter()
+            .find(|&h| mesh.is_boundary_halfedge(h))
+            .expect("a border edge");
+        let axis = [mesh.origin(border), mesh.target(border)]
+            .iter()
+            .filter_map(|v| directions.get(v))
+            .sum::<Vec3>()
+            .normalize_or_zero();
+        self.extrusion = Some(Extrusion {
+            halfedges,
+            directions,
+            start: hit.position,
+            axis,
+            distance: 0.0,
+        });
+        self.clear_hover();
+    }
+
+    /// Where each vertex of the extrusion goes.
+    fn extruded_positions(
+        mesh: &HalfEdgeMesh,
+        surface: &Surface<'_>,
+        extrusion: &Extrusion,
+    ) -> HashMap<VertexId, Vec3> {
+        extrusion
+            .directions
+            .iter()
+            .map(|(&v, &d)| (v, surface.snap(mesh.position(v) + d * extrusion.distance)))
+            .collect()
+    }
+
+    fn finish_extrusion(
+        &mut self,
+        retopo: &mut Retopo,
+        input: &ToolInput<'_>,
+        extrusion: Extrusion,
+    ) {
+        let mesh = retopo.mesh();
+        if extrusion.distance <= 0.0 || extrusion.halfedges.is_empty() {
+            return;
+        }
+        let positions = Self::extruded_positions(mesh, &input.surface, &extrusion);
+        let symmetry = retopo.symmetry();
+        let halfedges = extrusion.halfedges.clone();
+        let result = retopo.edit("Extrude", |m| {
+            edit::extrude(m, symmetry.as_ref(), &halfedges, &positions)
+        });
+        match result {
+            Ok(copies) => {
+                // Select the new border, ready to extrude again.
+                let mesh = retopo.doc.mesh();
+                let edges: Vec<EdgeId> = halfedges
+                    .iter()
+                    .filter_map(|&h| {
+                        let (a, b) = (copies.get(&mesh.origin(h))?, copies.get(&mesh.target(h))?);
+                        mesh.find_halfedge(*a, *b).map(|h| h.edge())
+                    })
+                    .collect();
+                retopo.selection.set_mode(mesh, SelectMode::Edge);
+                retopo
+                    .selection
+                    .apply(SelectOp::Replace, Elements::Edges(edges));
+                self.status = None;
+            }
+            Err(e) => self.status = Some(e.to_string()),
+        }
+    }
+
+    // ---- Tweak -------------------------------------------------------------
+
+    fn start_tweak(&mut self, retopo: &mut Retopo, input: &ToolInput<'_>) {
+        let Some(hit) = input.surface.raycast(&input.view, input.cursor) else {
+            return;
+        };
+        let radius = self.settings.brush_radius;
+        let mesh = retopo.mesh();
+        let eye = input.view.eye();
+        let affected: Vec<(VertexId, Vec3, f32)> = mesh
+            .vertices()
+            .filter_map(|v| {
+                let p = mesh.position(v);
+                let d = input.view.project(p)?.distance(input.cursor);
+                (d <= radius && (retopo.x_ray || input.surface.is_visible(eye, p)))
+                    .then(|| (v, p, geometry::falloff(d / radius)))
+            })
+            .collect();
+        if !affected.is_empty() {
+            self.tweak = Some(Tweak {
+                vertices: affected,
+                start: hit.position,
+                gesture: retopo.new_gesture(),
+            });
+        }
+    }
+
+    /// Moves the vertices under the brush with the cursor, by their weights,
+    /// keeping them on the surface.
+    fn tweak_under_brush(&mut self, retopo: &mut Retopo, input: &ToolInput<'_>) {
+        let Some(tweak) = &self.tweak else {
+            return;
+        };
+        let Some(hit) = input.surface.raycast(&input.view, input.cursor) else {
+            return;
+        };
+        let delta = hit.position - tweak.start;
+        let mesh = retopo.mesh();
+        let moved: HashMap<VertexId, Vec3> = tweak
+            .vertices
+            .iter()
+            .filter(|(v, ..)| mesh.contains_vertex(*v))
+            .map(|&(v, p, w)| (v, input.surface.snap(p + delta * w)))
+            .collect();
+        let gesture = tweak.gesture;
+        move_vertices(retopo, &moved, "Tweak", Some(gesture));
     }
 
     // ---- Loop --------------------------------------------------------------
@@ -1041,6 +1303,32 @@ impl Tools {
                 size: VERTEX_SIZE + 5.0,
             });
         }
+        if let Some(extrusion) = &self.extrusion
+            && extrusion.distance > 0.0
+        {
+            for &h in &extrusion.halfedges {
+                if !mesh.contains_halfedge(h) {
+                    continue;
+                }
+                let (a, b) = (mesh.origin(h), mesh.target(h));
+                let to = |v: VertexId| {
+                    mesh.position(v)
+                        + extrusion.directions.get(&v).copied().unwrap_or_default()
+                            * extrusion.distance
+                };
+                for (p, q) in [
+                    (mesh.position(a), to(a)),
+                    (to(a), to(b)),
+                    (to(b), mesh.position(b)),
+                ] {
+                    out.lines.push(OverlayLine {
+                        a: p,
+                        b: q,
+                        color: PENDING_COLOR,
+                    });
+                }
+            }
+        }
         for (points, closed) in self.loop_preview(retopo) {
             let n = points.len();
             let segments = if closed { n } else { n.saturating_sub(1) };
@@ -1109,6 +1397,41 @@ fn selected_vertices(mesh: &HalfEdgeMesh, selection: &selection::Selection) -> V
     vertices
 }
 
+/// For each vertex on border half-edges: the unit direction along the
+/// surface, across the border and away from its faces.
+fn border_directions(
+    mesh: &HalfEdgeMesh,
+    surface: &Surface<'_>,
+    halfedges: &[HalfEdgeId],
+) -> HashMap<VertexId, Vec3> {
+    let mut sums: HashMap<VertexId, Vec3> = HashMap::new();
+    for &h in halfedges {
+        let (a, b) = (mesh.position(mesh.origin(h)), mesh.position(mesh.target(h)));
+        let mid = (a + b) * 0.5;
+        let normal = surface.closest(mid).map_or(Vec3::Y, |s| s.normal);
+        let mut out = normal.cross(b - a).normalize_or_zero();
+        if let Some(f) = mesh.face_of(h.twin()) {
+            let n = mesh.face_vertices(f).count() as f32;
+            let center = mesh
+                .face_vertices(f)
+                .map(|v| mesh.position(v))
+                .sum::<Vec3>()
+                / n;
+            if out.dot(center - mid) > 0.0 {
+                out = -out;
+            }
+        }
+        // Longer edges weigh more, so short ones do not skew corners.
+        let weight = (b - a).length();
+        for v in [mesh.origin(h), mesh.target(h)] {
+            *sums.entry(v).or_default() += out * weight;
+        }
+    }
+    sums.into_iter()
+        .map(|(v, d)| (v, d.normalize_or_zero()))
+        .collect()
+}
+
 /// Moves new vertices onto the surface, with their mirror partners.
 fn snap_vertices(
     mesh: &mut HalfEdgeMesh,
@@ -1145,13 +1468,25 @@ pub fn relax(
     relax_borders: bool,
     gesture: Option<u64>,
 ) {
-    let symmetry = retopo.symmetry();
-    let mesh = retopo.mesh();
     let moved: HashMap<VertexId, Vec3> =
-        geometry::relaxed_positions(mesh, vertices, weights, relax_borders)
+        geometry::relaxed_positions(retopo.mesh(), vertices, weights, relax_borders)
             .into_iter()
             .map(|(v, p)| (v, surface.snap(p)))
             .collect();
+    move_vertices(retopo, &moved, "Relax", gesture);
+}
+
+/// Moves vertices and keeps mirror partners in sync: seam vertices stay on
+/// the seam, and when both partners move, the one on the positive side
+/// leads. With a `gesture`, merges into that undo step.
+pub fn move_vertices(
+    retopo: &mut Retopo,
+    moved: &HashMap<VertexId, Vec3>,
+    name: &str,
+    gesture: Option<u64>,
+) {
+    let symmetry = retopo.symmetry();
+    let mesh = retopo.mesh();
     // Pair vertices before moving any: pairing is by position.
     let partners: HashMap<VertexId, VertexId> = match &symmetry {
         Some(sym) => moved
@@ -1160,8 +1495,8 @@ pub fn relax(
             .collect(),
         None => HashMap::new(),
     };
-    let apply = |m: &mut polyflow_core::halfedge::HalfEdgeMesh| {
-        for (&v, &p) in &moved {
+    let apply = |m: &mut HalfEdgeMesh| {
+        for (&v, &p) in moved {
             match (&symmetry, partners.get(&v)) {
                 (Some(sym), Some(&w)) if w == v => {
                     let mut q = p;
@@ -1181,8 +1516,8 @@ pub fn relax(
         Ok::<_, ()>(())
     };
     let _ = match gesture {
-        Some(key) => retopo.edit_merged("Relax", key, apply),
-        None => retopo.edit("Relax", apply),
+        Some(key) => retopo.edit_merged(name, key, apply),
+        None => retopo.edit(name, apply),
     };
 }
 
@@ -1392,6 +1727,159 @@ mod tests {
         assert!(retopo.selection.is_empty());
         retopo.undo();
         assert_eq!(retopo.mesh().face_count(), 9);
+    }
+
+    #[test]
+    fn building_tools() {
+        let reference = plane(4.0, 8);
+        let bvh = Bvh::build(&reference);
+        let surface = Surface {
+            mesh: &reference,
+            bvh: &bvh,
+        };
+        let view = top_view();
+        let input = |p: Vec3, modifiers| ToolInput {
+            surface,
+            view,
+            cursor: view.project(p).unwrap(),
+            modifiers,
+        };
+        let none = ModifiersState::empty();
+        let drag = |tools: &mut Tools, retopo: &mut Retopo, from: Vec3, to: Vec3| {
+            tools.mouse_move(retopo, &input(from, none));
+            tools.mouse_down(retopo, &input(from, none), MouseButton::Left);
+            tools.mouse_move(retopo, &input(to, none));
+            tools.mouse_up(retopo, &input(to, none), MouseButton::Left);
+        };
+        let edges_at_z = |mesh: &HalfEdgeMesh, z: f32| -> Vec<EdgeId> {
+            mesh.edges()
+                .filter(|&e| {
+                    let h = e.halfedge(0);
+                    [mesh.origin(h), mesh.target(h)]
+                        .iter()
+                        .all(|&v| (mesh.position(v).z - z).abs() < 1e-4)
+                })
+                .collect()
+        };
+
+        // Extrude one border edge outwards, then its new edge again.
+        let mut retopo = grid_retopo();
+        let mut tools = Tools::default();
+        tools.select(ToolKind::Extrude);
+        drag(
+            &mut tools,
+            &mut retopo,
+            Vec3::new(-1.0, 0.0, -1.5),
+            Vec3::new(-1.0, 0.0, -2.2),
+        );
+        let mesh = retopo.mesh();
+        mesh.validate().unwrap();
+        assert_eq!((mesh.vertex_count(), mesh.face_count()), (18, 10));
+        let far = mesh
+            .vertices()
+            .filter(|&v| (mesh.position(v).z + 2.2).abs() < 0.05)
+            .count();
+        assert_eq!(far, 2, "{tools:?}");
+        assert_eq!(retopo.selection.len(), 1, "the new border edge is selected");
+        drag(
+            &mut tools,
+            &mut retopo,
+            Vec3::new(-1.0, 0.0, -2.2),
+            Vec3::new(-1.0, 0.0, -2.8),
+        );
+        assert_eq!(
+            retopo.mesh().face_count(),
+            11,
+            "selected edges extrude again"
+        );
+
+        // Tweak: the brush drags nearby vertices along, on the surface.
+        let mut retopo = grid_retopo();
+        tools.select(ToolKind::Tweak);
+        drag(
+            &mut tools,
+            &mut retopo,
+            Vec3::new(-0.5, 0.0, -0.5),
+            Vec3::new(-0.3, 0.0, -0.5),
+        );
+        let mesh = retopo.mesh();
+        assert!(
+            mesh.vertices()
+                .any(|v| (mesh.position(v).x + 0.3).abs() < 0.02)
+        );
+        assert!(mesh.vertices().all(|v| mesh.position(v).y.abs() < 1e-4));
+        assert_eq!(retopo.doc.undo_name(), Some("Tweak"));
+
+        // Fill: delete the middle face, select an edge of the hole, fill.
+        let mut retopo = grid_retopo();
+        tools.select(ToolKind::Select);
+        retopo
+            .selection
+            .set_mode(retopo.doc.mesh(), SelectMode::Face);
+        let middle = retopo
+            .mesh()
+            .faces()
+            .find(|&f| {
+                !retopo
+                    .mesh()
+                    .face_vertices(f)
+                    .any(|v| retopo.mesh().is_boundary_vertex(v))
+            })
+            .unwrap();
+        retopo
+            .selection
+            .apply(SelectOp::Replace, Elements::Faces(vec![middle]));
+        tools.run(&mut retopo, &input(Vec3::ZERO, none), Command::Delete);
+        assert_eq!(retopo.mesh().face_count(), 8);
+        retopo
+            .selection
+            .set_mode(retopo.doc.mesh(), SelectMode::Edge);
+        let hole_edge = edges_at_z(retopo.mesh(), -0.5)
+            .into_iter()
+            .find(|&e| retopo.mesh().is_boundary_edge(e))
+            .unwrap();
+        retopo
+            .selection
+            .apply(SelectOp::Replace, Elements::Edges(vec![hole_edge]));
+        tools.run(&mut retopo, &input(Vec3::ZERO, none), Command::Fill);
+        assert_eq!(retopo.mesh().face_count(), 9, "{:?}", tools.status);
+        retopo.mesh().validate().unwrap();
+
+        // Bridge: remove the middle row, then bridge the two borders.
+        let mut retopo = grid_retopo();
+        retopo
+            .selection
+            .set_mode(retopo.doc.mesh(), SelectMode::Face);
+        let row: Vec<FaceId> = retopo
+            .mesh()
+            .faces()
+            .filter(|&f| {
+                let mesh = retopo.mesh();
+                let z: f32 = mesh
+                    .face_vertices(f)
+                    .map(|v| mesh.position(v).z)
+                    .sum::<f32>()
+                    / 4.0;
+                z.abs() < 1e-4
+            })
+            .collect();
+        assert_eq!(row.len(), 3);
+        retopo
+            .selection
+            .apply(SelectOp::Replace, Elements::Faces(row));
+        tools.run(&mut retopo, &input(Vec3::ZERO, none), Command::Delete);
+        assert_eq!(retopo.mesh().face_count(), 6);
+        retopo
+            .selection
+            .set_mode(retopo.doc.mesh(), SelectMode::Edge);
+        let mut borders = edges_at_z(retopo.mesh(), -0.5);
+        borders.extend(edges_at_z(retopo.mesh(), 0.5));
+        retopo
+            .selection
+            .apply(SelectOp::Replace, Elements::Edges(borders));
+        tools.run(&mut retopo, &input(Vec3::ZERO, none), Command::Bridge);
+        assert_eq!(retopo.mesh().face_count(), 9, "{:?}", tools.status);
+        retopo.mesh().validate().unwrap();
     }
 
     #[test]
