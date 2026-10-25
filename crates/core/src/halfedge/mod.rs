@@ -21,11 +21,17 @@
 //!   boundary gaps. Interior vertices have exactly one fan.
 //! - If a vertex is on a boundary, its `outgoing` half-edge is a boundary one.
 //! - Only half-edges with a face carry a UV.
+//! - Both halves of an edge agree on whether it is hard.
 //!
 //! UVs are stored per face corner: the half-edge of a face holds the UV of its
 //! origin vertex in that face, so UV seams need no split vertices. They come
 //! from DCC tools (Polyflow does not unwrap); faces created by the retopology
 //! tools have none.
+//!
+//! Edges can be marked hard: bakes split the low-poly's normals across them
+//! (see `polyflow-bake::mesh`). The mark lives on both halves of the edge, so
+//! it is journaled like any other write, and the topology operations carry
+//! it to the edges that replace a hard one.
 
 mod build;
 mod loops;
@@ -107,6 +113,8 @@ pub(crate) struct HalfEdge {
     pub face: Option<FaceId>,
     /// UV of `origin` in `face`; always `None` on boundaries.
     pub uv: Option<Vec2>,
+    /// The edge is hard (the same on both halves).
+    pub hard: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,6 +266,21 @@ impl HalfEdgeMesh {
     /// True if any face corner has a UV.
     pub fn has_uvs(&self) -> bool {
         self.halfedges.iter().flatten().any(|h| h.uv.is_some())
+    }
+
+    /// True if the edge is marked hard: bakes split normals across it.
+    pub fn is_hard(&self, e: EdgeId) -> bool {
+        self.he(e.halfedge(0)).hard
+    }
+
+    /// True if any edge is marked hard.
+    pub fn has_hard_edges(&self) -> bool {
+        self.halfedges.iter().flatten().any(|h| h.hard)
+    }
+
+    /// The edges marked hard.
+    pub fn hard_edges(&self) -> impl Iterator<Item = EdgeId> + '_ {
+        self.edges().filter(|&e| self.is_hard(e))
     }
 
     pub fn is_boundary_halfedge(&self, h: HalfEdgeId) -> bool {
@@ -489,6 +512,14 @@ impl HalfEdgeMesh {
             if h == start {
                 break;
             }
+        }
+    }
+
+    /// Marks an edge hard, or smooth again.
+    pub fn set_hard(&mut self, e: EdgeId, hard: bool) {
+        for h in [e.halfedge(0), e.halfedge(1)] {
+            let he = *self.he(h);
+            self.set_halfedge(h, Some(HalfEdge { hard, ..he }));
         }
     }
 

@@ -1045,7 +1045,10 @@ impl AppState {
             return;
         }
         let cage = self.bake_state.use_cage.then(|| self.retopo.cage());
-        let low = polyflow_bake::BakeMesh::with_cage(self.retopo.mesh(), cage.as_ref());
+        let normals = polyflow_bake::NormalOptions {
+            hard_uv_seams: self.bake_state.hard_uv_seams,
+        };
+        let low = polyflow_bake::BakeMesh::new(self.retopo.mesh(), cage.as_ref(), normals);
         let settings = bake::settings(&self.bake_state, self.retopo.scene_radius);
         let format =
             polyflow_io::image::MapFormat::from_name(&self.bake_state.format).unwrap_or_default();

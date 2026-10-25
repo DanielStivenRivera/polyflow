@@ -98,6 +98,10 @@ pub enum Command {
     Bridge,
     /// Fill the holes along the selected border edges (H).
     Fill,
+    /// Mark the selected edges hard (K).
+    MarkHard,
+    /// Clear the hard mark of the selected edges (Shift+K).
+    ClearHard,
 }
 
 /// An extrusion being dragged out.
@@ -610,6 +614,15 @@ impl Tools {
                 self.run(retopo, input, Command::Fill);
                 return true;
             }
+            Some("k") => {
+                let command = if input.modifiers.shift_key() {
+                    Command::ClearHard
+                } else {
+                    Command::MarkHard
+                };
+                self.run(retopo, input, command);
+                return true;
+            }
             _ => {}
         }
         match key {
@@ -738,6 +751,22 @@ impl Tools {
                         Ok(())
                     })
                 }
+            }
+            Command::MarkHard | Command::ClearHard => {
+                let hard = command == Command::MarkHard;
+                let mut edges = edit::hard_edge_candidates(retopo.mesh(), &selection);
+                if edges.is_empty() {
+                    edges.extend(self.hover_edge);
+                }
+                if edges.is_empty() {
+                    self.status = Some("Select the edges to mark".into());
+                    return false;
+                }
+                let name = if hard { "Mark hard" } else { "Mark smooth" };
+                retopo.edit(name, |m| {
+                    edit::set_hard(m, sym, &edges, hard);
+                    Ok(())
+                })
             }
         };
         self.report(result);
@@ -1880,6 +1909,40 @@ mod tests {
         tools.run(&mut retopo, &input(Vec3::ZERO, none), Command::Bridge);
         assert_eq!(retopo.mesh().face_count(), 9, "{:?}", tools.status);
         retopo.mesh().validate().unwrap();
+
+        // Hard edges: around a selected corner face, and its mirror image.
+        let mut retopo = grid_retopo();
+        retopo.symmetry_axis = Some(Axis::X);
+        retopo.scene_radius = 4.0;
+        retopo
+            .selection
+            .set_mode(retopo.doc.mesh(), SelectMode::Face);
+        let corner = retopo
+            .mesh()
+            .faces()
+            .find(|&f| {
+                let mesh = retopo.mesh();
+                mesh.face_vertices(f)
+                    .any(|v| mesh.position(v) == Vec3::new(-1.5, 0.0, -1.5))
+            })
+            .unwrap();
+        retopo
+            .selection
+            .apply(SelectOp::Replace, Elements::Faces(vec![corner]));
+        tools.run(&mut retopo, &input(Vec3::ZERO, none), Command::MarkHard);
+        let mesh = retopo.mesh();
+        assert_eq!(mesh.hard_edges().count(), 8, "{:?}", tools.status);
+        assert!(
+            mesh.hard_edges()
+                .all(|e| mesh.position(mesh.origin(e.halfedge(0))).x.abs() > 0.4)
+        );
+        assert_eq!(retopo.doc.undo_name(), Some("Mark hard"));
+        let shift = ModifiersState::SHIFT;
+        let key = Key::Character("k".into());
+        assert!(tools.key(&mut retopo, &input(Vec3::ZERO, shift), &key));
+        assert!(!retopo.mesh().has_hard_edges());
+        retopo.undo();
+        assert_eq!(retopo.mesh().hard_edges().count(), 8);
     }
 
     #[test]

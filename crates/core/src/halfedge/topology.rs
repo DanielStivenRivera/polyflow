@@ -4,7 +4,9 @@
 //! Each operation rebuilds the faces it touches: it removes them and adds
 //! their replacements with [`HalfEdgeMesh::add_face`], so it gets the same
 //! manifold checks. Face corners keep their UVs; corners of new vertices get
-//! UVs interpolated along the edge they split. An operation that fails may
+//! UVs interpolated along the edge they split. Hard edges stay hard, and so
+//! do the halves of a split hard edge and the edge a hard edge is merged
+//! into. An operation that fails may
 //! leave the mesh half-edited: run it inside `MeshDocument::edit`, which
 //! rolls it back.
 
@@ -46,7 +48,8 @@ impl HalfEdgeMesh {
             .iter()
             .map(|&f| insert_on_edge(&self.face_corners(f), a, b, m, t))
             .collect();
-        self.rebuild(&faces, new)?;
+        let splits = HashMap::from([(edge_key(a, b), m)]);
+        self.rebuild_mapped(&faces, new, |x, y| split_hard_edge(&splits, x, y))?;
         Ok(m)
     }
 
@@ -128,7 +131,8 @@ impl HalfEdgeMesh {
                 new.push(kept);
             }
         }
-        self.rebuild(&faces, new)?;
+        let merge = |v| if merged.contains(&v) { keep } else { v };
+        self.rebuild_mapped(&faces, new, |a, b| vec![[merge(a), merge(b)]])?;
         if self.contains_vertex(keep) {
             self.set_position(keep, position);
         }
@@ -261,7 +265,16 @@ impl HalfEdgeMesh {
                 "dissolving the vertex would leave a face with fewer than 3 sides",
             ));
         }
-        self.rebuild(&faces, new)?;
+        // Between just two edges, the edge replacing them is hard if one was.
+        let neighbors: Vec<VertexId> = self.vertex_neighbors(v).collect();
+        let joined = match neighbors[..] {
+            [p, q] if self.valence(v) == 2 => Some([p, q]),
+            _ => None,
+        };
+        self.rebuild_mapped(&faces, new, |a, b| match joined {
+            Some(pq) if a == v || b == v => vec![pq],
+            _ => vec![[a, b]],
+        })?;
         if self.contains_vertex(v) && self.outgoing(v).is_none() {
             self.set_vertex(v, None);
         }
@@ -409,7 +422,12 @@ impl HalfEdgeMesh {
             new.push(corners);
         }
         let removed: Vec<FaceId> = crossed.into_iter().chain(others).collect();
-        self.rebuild(&removed, new)?;
+        let splits: HashMap<(VertexId, VertexId), VertexId> = ends
+            .iter()
+            .zip(&mids)
+            .map(|(&(a, b), &m)| (edge_key(a, b), m))
+            .collect();
+        self.rebuild_mapped(&removed, new, |x, y| split_hard_edge(&splits, x, y))?;
         Ok(mids)
     }
 
@@ -458,14 +476,33 @@ impl HalfEdgeMesh {
 
     /// Replaces faces: removes `remove`, then adds `add` with their corner
     /// UVs. Vertices of removed faces that end up without edges are removed.
+    /// Hard edges of the removed faces are hard again wherever an edge joins
+    /// the same vertices.
     pub(super) fn rebuild(
         &mut self,
         remove: &[FaceId],
         add: Vec<Vec<Corner>>,
     ) -> Result<Vec<FaceId>, TopologyError> {
+        self.rebuild_mapped(remove, add, |a, b| vec![[a, b]])
+    }
+
+    /// Like [`Self::rebuild`], with each hard edge `a`-`b` of the removed
+    /// faces carried to the edges between the vertex pairs `hard(a, b)`.
+    pub(super) fn rebuild_mapped(
+        &mut self,
+        remove: &[FaceId],
+        add: Vec<Vec<Corner>>,
+        hard: impl Fn(VertexId, VertexId) -> Vec<[VertexId; 2]>,
+    ) -> Result<Vec<FaceId>, TopologyError> {
         let mut touched: Vec<VertexId> = Vec::new();
+        let mut hard_ends: Vec<(VertexId, VertexId)> = Vec::new();
         for &f in remove {
             touched.extend(self.face_vertices(f));
+            for h in self.face_halfedges(f) {
+                if self.is_hard(h.edge()) {
+                    hard_ends.push((self.origin(h), self.target(h)));
+                }
+            }
         }
         for &f in remove {
             self.remove_face(f, false)?;
@@ -509,6 +546,15 @@ impl HalfEdgeMesh {
             }
             pending = failed;
         }
+        for [a, b] in hard_ends.into_iter().flat_map(|(a, b)| hard(a, b)) {
+            if a != b
+                && self.contains_vertex(a)
+                && self.contains_vertex(b)
+                && let Some(h) = self.find_halfedge(a, b)
+            {
+                self.set_hard(h.edge(), true);
+            }
+        }
         for v in touched {
             if self.contains_vertex(v) && self.outgoing(v).is_none() {
                 self.set_vertex(v, None);
@@ -523,6 +569,24 @@ impl HalfEdgeMesh {
         } else {
             Err(TopologyError::Refused("the edge does not exist"))
         }
+    }
+}
+
+/// An edge's ends in a fixed order, to look it up whichever way it runs.
+fn edge_key(a: VertexId, b: VertexId) -> (VertexId, VertexId) {
+    (a.min(b), a.max(b))
+}
+
+/// The edges a hard edge `a`-`b` becomes: its two halves if `splits` gives
+/// it a middle vertex, else itself.
+fn split_hard_edge(
+    splits: &HashMap<(VertexId, VertexId), VertexId>,
+    a: VertexId,
+    b: VertexId,
+) -> Vec<[VertexId; 2]> {
+    match splits.get(&edge_key(a, b)) {
+        Some(&m) => vec![[a, m], [m, b]],
+        None => vec![[a, b]],
     }
 }
 

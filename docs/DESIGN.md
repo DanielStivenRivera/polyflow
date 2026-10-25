@@ -215,7 +215,7 @@ undo step and respects symmetry.
    export waits for a solid open-source writer.
 5. ✅ Sculpt cache: a binary cache of the prepared sculpt (mesh, meshlets,
    BVH) so 10M triangles reopen within the 0.5 s budget.
-6. Hard edges in bakes: normals split at UV island borders or at marked
+6. ✅ Hard edges in bakes: normals split at UV island borders or at marked
    edges, baked and exported that way in the low-poly.
 7. Polish and release v0.3.0.
 
@@ -305,6 +305,33 @@ then every index and range of the mesh, meshlets and BVH (including its
 depth against the traversal stack), so a damaged file is dropped and the
 sculpt prepared again, never a crash.
 
+### Hard edges
+
+An edge can be marked hard (K; with faces selected, the edges around them).
+The mark is a flag on both half-edges, so it is journaled and undone like any
+write; topology operations carry it to the edges that replace a hard one (the
+halves of a split edge, the edge left when a vertex between two hard edges is
+dissolved, the edge a merge moves it to). Retopology OBJ files keep it as
+`#polyflow-hard a b` comments, which other programs skip: smoothing groups,
+OBJ's own way, cannot express a hard edge that ends inside the mesh, and the
+low-poly as baked carries explicit normals anyway.
+
+The baker's normals are computed per face corner: around each vertex, the
+corners on either side of a smooth edge are averaged together (union-find
+over corners), so hard edges split a vertex's faces into groups averaged
+apart; with *Hard edges at UV seams*, edges whose corners differ in UV split
+them too. A single hard edge ending at a vertex splits nothing there, since
+the faces still connect around the other way, as in Blender. Without hard
+edges the sums and their order are those of the smooth vertex normals, so
+results are unchanged bit for bit. MikkTSpace then welds corners by
+position, normal and UV, and the exported low-poly has the same normals.
+
+Rays travel along the smooth vertex normals whatever the split (as with
+"averaged normals" in other bakers): split normals would aim the texels on
+the two sides of a hard edge apart and leave a strip of the sculpt unbaked
+between them. The automatic cage uses the same smooth normals, so it stays
+closed.
+
 Left for v0.4: height, cavity, curvature and ID maps; batch baking and
 Python bindings. UV unwrapping stays an open question.
 
@@ -317,7 +344,7 @@ they import. Polyflow fixes all three (`polyflow-bake::mesh`):
 - **Triangles**: quads split along their shorter diagonal, other polygons
   fanned from their first corner.
 - **Normals**: smooth, angle-weighted vertex normals computed on the polygons
-  (independent of the triangulation). Hard edges come later.
+  (independent of the triangulation), split across hard edges (see above).
 - **Tangents**: MikkTSpace through `bevy_mikktspace`, which matches the
   reference C code bit for bit; a test compares against that C code
   (`mikktspace-sys`). The encoding inverts a MikkTSpace shader exactly: `N`
@@ -331,7 +358,7 @@ agree to within 8-bit rounding (mean 0.2°).
 ### Projection
 
 The CPU baker projects by ray distance: each texel's ray starts a frontal
-distance in front of the low-poly (along its smooth normal) and runs back to
+distance in front of the low-poly (along its smooth normal, never split) and runs back to
 a rear distance behind it; the first reference surface met is baked, as
 Cycles and Substance do. Texels whose ray meets nothing are reported as
 misses. Ambient occlusion traces cosine-weighted rays from the hit, using the

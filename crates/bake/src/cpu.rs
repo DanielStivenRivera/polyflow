@@ -4,7 +4,8 @@
 //! Projection: for each texel, a ray starts in front of the low-poly
 //! surface and travels back through it, up to `rear_distance` behind; the
 //! first reference surface it meets is the one baked. Without a cage the
-//! ray starts `frontal_distance` out along the smooth normal; with one (see
+//! ray starts `frontal_distance` out along the smooth normal (never split at
+//! hard edges, see [`crate::mesh`]); with one (see
 //! [`crate::cage`]) it starts at the texel's point on the cage. Texels whose ray finds
 //! nothing are "missed": they get neutral values (flat normal, no occlusion)
 //! and are reported, as they usually mean the distances are too small.
@@ -425,7 +426,8 @@ fn bake_row(
         row.covered[xi] += 1;
         let sample = low.sample(t as usize, bary);
         let normal = sample.frame.normal.normalize_or_zero();
-        let hit = ray(low, &sample, normal, settings).and_then(|(origin, dir, reach)| {
+        let projection = sample.projection.normalize_or_zero();
+        let hit = ray(low, &sample, projection, settings).and_then(|(origin, dir, reach)| {
             reference.bvh.raycast(reference.mesh, origin, dir, reach)
         });
         let add = |slot: &mut [f32], v: Vec3| {
@@ -468,7 +470,8 @@ fn bake_row(
 }
 
 /// The texel's ray: origin, unit direction and length. From the cage point
-/// through the low-poly point if there is a cage, else along the normal.
+/// through the low-poly point if there is a cage, else along `normal` (the
+/// smooth one).
 fn ray(
     low: &BakeMesh,
     sample: &crate::SurfaceSample,

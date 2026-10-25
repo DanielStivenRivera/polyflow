@@ -3,6 +3,11 @@
 //! Unlike reference meshes, retopology meshes keep their polygons (quads
 //! stay quads) and are small, so this parser is sequential. Per-corner UVs
 //! (`vt`) are kept; normals are ignored.
+//!
+//! Hard edges are written as comments other programs skip, one per edge:
+//! `#polyflow-hard 3 7` marks the edge between vertices 3 and 7. Smoothing
+//! groups cannot say the same: they cannot express a hard edge that ends
+//! inside the mesh.
 
 use std::io::Write;
 use std::path::Path;
@@ -15,7 +20,10 @@ use polyflow_core::halfedge::{HalfEdgeMesh, VertexId};
 use crate::LoadError;
 use crate::obj::{Cursor, ObjError, parse_int};
 
-/// Writes the mesh as OBJ with its polygons and UVs. Vertex ids are
+/// Starts a hard-edge comment line (see the module docs).
+const HARD_EDGE: &[u8] = b"#polyflow-hard ";
+
+/// Writes the mesh as OBJ with its polygons, UVs and hard edges. Vertex ids are
 /// renumbered densely, so gaps left by deleted vertices do not reach the
 /// file. Identical UVs are written once; faces with a corner lacking a UV are
 /// written without any.
@@ -69,6 +77,11 @@ pub fn write_obj(mesh: &HalfEdgeMesh, out: impl Write) -> std::io::Result<()> {
         }
         writeln!(out)?;
     }
+    for e in mesh.hard_edges() {
+        let h = e.halfedge(0);
+        let (a, b) = (number[&mesh.origin(h)], number[&mesh.target(h)]);
+        writeln!(out, "#polyflow-hard {a} {b}")?;
+    }
     out.flush()
 }
 
@@ -104,6 +117,7 @@ pub fn parse_obj(bytes: &[u8]) -> Result<ImportedRetopo, ObjError> {
     let mut corners: Vec<u32> = Vec::new();
     let mut corner_uvs: Vec<u32> = Vec::new();
     let mut face_starts: Vec<usize> = Vec::new();
+    let mut hard_edges: Vec<[u32; 2]> = Vec::new();
     let mut skipped_faces = 0;
 
     for (line_index, line) in bytes.split(|&b| b == b'\n').enumerate() {
@@ -112,6 +126,15 @@ pub fn parse_obj(bytes: &[u8]) -> Result<ImportedRetopo, ObjError> {
             line: line_index + 1,
             message,
         };
+        if let Some(rest) = line.strip_prefix(HARD_EDGE) {
+            // A comment to other programs: a malformed one is skipped.
+            let mut cursor = Cursor::new(rest);
+            let mut end = || resolve(cursor.token()?, positions.len(), "vertex").ok();
+            if let (Some(a), Some(b)) = (end(), end()) {
+                hard_edges.push([a, b]);
+            }
+            continue;
+        }
         match line {
             [b'v', b' ' | b'\t', rest @ ..] => {
                 let mut cursor = Cursor::new(rest);
@@ -201,6 +224,14 @@ pub fn parse_obj(bytes: &[u8]) -> Result<ImportedRetopo, ObjError> {
         }
     }
     skipped_faces += pending.len();
+    for [a, b] in hard_edges {
+        let (a, b) = (ids[a as usize], ids[b as usize]);
+        if a != b
+            && let Some(h) = mesh.find_halfedge(a, b)
+        {
+            mesh.set_hard(h.edge(), true);
+        }
+    }
     Ok(ImportedRetopo {
         mesh,
         skipped_faces,
@@ -414,5 +445,45 @@ mod tests {
                 imported.mesh.validate().unwrap();
             }
         }
+    }
+
+    #[test]
+    fn hard_edges_round_trip_as_comments() {
+        let mut mesh = grid(3);
+        // Leave holes in the vertex ids, so numbering matters.
+        let corner = mesh.vertices().next().unwrap();
+        mesh.remove_vertex(corner).unwrap();
+        let hard: Vec<_> = mesh.edges().step_by(3).collect();
+        for &e in &hard {
+            mesh.set_hard(e, true);
+        }
+        let mut text = Vec::new();
+        write_obj(&mesh, &mut text).unwrap();
+        let written = String::from_utf8(text.clone()).unwrap();
+        assert_eq!(written.matches("\n#polyflow-hard ").count(), hard.len());
+
+        let back = parse_obj(&text).unwrap().mesh;
+        back.validate().unwrap();
+        let ends = |m: &HalfEdgeMesh| {
+            let mut out: Vec<[[u32; 3]; 2]> = m
+                .hard_edges()
+                .map(|e| {
+                    let h = e.halfedge(0);
+                    let p = |v| m.position(v).to_array().map(f32::to_bits);
+                    let mut ends = [p(m.origin(h)), p(m.target(h))];
+                    ends.sort_unstable();
+                    ends
+                })
+                .collect();
+            out.sort_unstable();
+            out
+        };
+        assert_eq!(ends(&back), ends(&mesh));
+
+        // Malformed marks and marks of missing edges are skipped.
+        let text = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nv 5 5 5\nf 1 2 3\n#polyflow-hard 1\n\
+            #polyflow-hard 1 9\n#polyflow-hard x y\n#polyflow-hard 1 4\n#polyflow-hard 2 3\n";
+        let back = parse_obj(text).unwrap().mesh;
+        assert_eq!(back.hard_edges().count(), 1);
     }
 }

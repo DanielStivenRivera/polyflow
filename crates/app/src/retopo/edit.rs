@@ -470,6 +470,37 @@ pub fn edges_with_mirrors(
     all
 }
 
+/// The edges a hard mark applies to: the selected edges, the edges between
+/// selected vertices, or the edges around the selected faces (with a
+/// selected face on one side only, border edges included).
+pub fn hard_edge_candidates(mesh: &HalfEdgeMesh, selection: &Selection) -> Vec<EdgeId> {
+    match selection.mode() {
+        SelectMode::Face => mesh
+            .edges()
+            .filter(|&e| {
+                let selected = |h: HalfEdgeId| {
+                    mesh.face_of(h)
+                        .is_some_and(|f| selection.faces().contains(&f))
+                };
+                selected(e.halfedge(0)) != selected(e.halfedge(1))
+            })
+            .collect(),
+        _ => selection.edges_for_loops(mesh),
+    }
+}
+
+/// Marks `edges` hard (or smooth), and their mirror images.
+pub fn set_hard(
+    mesh: &mut HalfEdgeMesh,
+    symmetry: Option<&Symmetry>,
+    edges: &[EdgeId],
+    hard: bool,
+) {
+    for e in edges_with_mirrors(mesh, symmetry, edges) {
+        mesh.set_hard(e, hard);
+    }
+}
+
 /// Extrudes border half-edges to `positions` (one per vertex on them; see
 /// `HalfEdgeMesh::extrude_border`). With symmetry the half-edges should
 /// include their mirror images; copies of mirror partners are made exact

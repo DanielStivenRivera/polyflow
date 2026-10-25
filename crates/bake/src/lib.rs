@@ -24,6 +24,6 @@ pub use cpu::{
     BakeControl, BakeError, BakeSettings, BakeSums, Baked, Coverage, MAX_SAMPLES, Map, MapSet,
     NormalY, Reference, bake, finish,
 };
-pub use mesh::{BakeMesh, Corner, SurfaceSample};
+pub use mesh::{BakeMesh, Corner, NormalOptions, SurfaceSample};
 pub use raster::{UvRaster, rasterize, rasterize_rows};
 pub use tangent::TangentFrame;

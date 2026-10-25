@@ -81,7 +81,9 @@ their center, J connects two selected vertices across their face and T
 rotates the selected edges (or the one under the cursor). B bridges two
 selected borders with a row of quads, and H fills the holes along the
 selected border edges: with a grid of quads when the border has an even
-number of edges, with one polygon otherwise.
+number of edges, with one polygon otherwise. K marks the selected edges hard
+for baking (with faces selected, the edges around them) and Shift+K clears
+them; hard edges are drawn in cyan.
 
 Symmetry (X toggles it on the X axis) mirrors every edit. Ctrl+Z / Ctrl+Y undo
 and redo; Esc or a right click cancels the face in progress. If the retopo
@@ -110,8 +112,10 @@ and look a set distance behind it; if the panel reports many missed texels,
 raise those distances. When the bake finishes, the viewport previews the
 low-poly with its maps.
 
-Next to the maps, the bake writes `<name>_low.obj` and `<name>_low.glb`: the
-low-poly triangulated and with the normals it was baked with (the glTF also
+Normals are smooth except across the edges marked hard, and across UV seams
+too with **Hard edges at UV seams**. Next to the maps, the bake writes
+`<name>_low.obj` and `<name>_low.glb`: the low-poly triangulated and with the
+normals it was baked with (the glTF also
 carries the MikkTSpace tangents, and a material using the PNG maps). Use that
 mesh in your engine with the maps, so the normal map shades as baked.
 

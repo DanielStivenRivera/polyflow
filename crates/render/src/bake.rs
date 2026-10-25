@@ -272,16 +272,18 @@ pub fn bake_with(
     create_pipeline(&mut res, ray_query)?;
 
     // Inputs that do not change during the bake.
-    let corners: Vec<[f32; 16]> = low
+    let corners: Vec<[f32; 20]> = low
         .corners
         .iter()
         .map(|c| {
             let [px, py, pz] = c.position.to_array();
             let [nx, ny, nz] = c.normal.to_array();
             let [cx, cy, cz] = c.cage.to_array();
+            let [rx, ry, rz] = c.projection.to_array();
             let t = c.tangent.to_array();
             [
-                px, py, pz, 0.0, nx, ny, nz, 0.0, t[0], t[1], t[2], t[3], cx, cy, cz, 0.0,
+                px, py, pz, 0.0, nx, ny, nz, 0.0, t[0], t[1], t[2], t[3], cx, cy, cz, 0.0, rx, ry,
+                rz, 0.0,
             ]
         })
         .collect();
@@ -938,10 +940,35 @@ mod tests {
         if ctx.ray_query {
             tracers.push(Tracer::RayQuery);
         }
-        for (tracer, cage) in tracers.iter().flat_map(|&t| [(t, false), (t, true)]) {
-            eprintln!("{tracer:?}, cage {cage}:");
+        // Hard edges: at the UV seams, and around the inside of the ring.
+        let mut hard = retopo.clone();
+        let inner: Vec<_> = hard
+            .edges()
+            .filter(|&e| {
+                let h = e.halfedge(0);
+                let r = |v| {
+                    let p = hard.position(v);
+                    p.x.hypot(p.z)
+                };
+                r(hard.origin(h)) < 0.66 && r(hard.target(h)) < 0.66
+            })
+            .collect();
+        assert!(!inner.is_empty());
+        for e in inner {
+            hard.set_hard(e, true);
+        }
+        let seams = polyflow_bake::NormalOptions {
+            hard_uv_seams: true,
+        };
+        let cases = [(false, false), (true, false), (false, true)];
+        for (tracer, (cage, split)) in tracers.iter().flat_map(|&t| cases.map(|c| (t, c))) {
+            eprintln!("{tracer:?}, cage {cage}, hard edges {split}:");
             let cage = cage.then(|| polyflow_bake::Cage::automatic(&retopo, 0.05));
-            let low = BakeMesh::with_cage(&retopo, cage.as_ref());
+            let low = if split {
+                BakeMesh::new(&hard, None, seams)
+            } else {
+                BakeMesh::with_cage(&retopo, cage.as_ref())
+            };
             let mut settings = BakeSettings::for_scene(160, 96, 1.4);
             settings.samples = 2;
             settings.ao_samples = 16;

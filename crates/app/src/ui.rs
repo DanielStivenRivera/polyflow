@@ -766,6 +766,11 @@ fn bake_panel(ui: &mut egui::Ui, bake: &mut BakeUi<'_>, actions: &mut Actions) {
                 .on_hover_text("Green down: Unreal, 3ds Max.");
         });
         ui.checkbox(&mut state.object_normal, "Object-space normal");
+        ui.checkbox(&mut state.hard_uv_seams, "Hard edges at UV seams")
+            .on_hover_text(
+                "Split the retopology's normals where UV islands meet, besides the edges \
+                 marked hard (K). The exported low-poly gets the same normals.",
+            );
         ui.horizontal(|ui| {
             ui.checkbox(&mut state.ambient_occlusion, "Ambient occlusion");
             ui.add(
@@ -1010,6 +1015,18 @@ fn select_section(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Ac
             "Fill",
             "Fill the holes along the selected border edges, with a grid of quads when the border has an even number of edges (H)",
             Command::Fill,
+        );
+        button(
+            ui,
+            "Hard",
+            "Mark the selected edges hard: bakes split normals across them. With faces selected, the edges around them (K)",
+            Command::MarkHard,
+        );
+        button(
+            ui,
+            "Smooth",
+            "Clear the hard mark from the selected edges (Shift+K)",
+            Command::ClearHard,
         );
     });
 }

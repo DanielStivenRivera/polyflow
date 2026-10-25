@@ -11,6 +11,7 @@ struct Corner
     float4 normal;   // xyz, unit length
     float4 tangent;  // xyz unit tangent, w bitangent sign
     float4 cage;     // xyz
+    float4 projection; // xyz, the smooth normal rays travel along
 };
 
 struct Node
@@ -216,15 +217,18 @@ void bakeTexel<T : ITracer>(T tracer, uint3 id)
     float3 frameNormal = c0.normal.xyz * w.x + c1.normal.xyz * w.y + c2.normal.xyz * w.z;
     float4 tangent = c0.tangent * w.x + c1.tangent * w.y + c2.tangent * w.z;
     float3 cagePoint = c0.cage.xyz * w.x + c1.cage.xyz * w.y + c2.cage.xyz * w.z;
+    float3 projection = c0.projection.xyz * w.x + c1.projection.xyz * w.y + c2.projection.xyz * w.z;
     float sign = tangent.w < 0.0 ? -1.0 : 1.0;
     float3 normal = normalizeOr(frameNormal, float3(0, 0, 0));
+    float3 rayNormal = normalizeOr(projection, float3(0, 0, 0));
 
-    // `ray`: from the cage point through the surface, or along the normal.
+    // `ray`: from the cage point through the surface, or along the smooth
+    // normal.
     bool valid = false;
     float3 origin = float3(0, 0, 0);
     float3 dir = float3(0, 0, 0);
     float reach = 0;
-    bool nonzero = any(normal != float3(0, 0, 0));
+    bool nonzero = any(rayNormal != float3(0, 0, 0));
     if ((p.flags & FLAG_CAGE) != 0)
     {
         float3 toSurface = position - cagePoint;
@@ -241,15 +245,15 @@ void bakeTexel<T : ITracer>(T tracer, uint3 id)
         {
             valid = true;
             origin = position;
-            dir = -normal;
+            dir = -rayNormal;
             reach = p.rear;
         }
     }
     else if (nonzero)
     {
         valid = true;
-        origin = position + normal * p.frontal;
-        dir = -normal;
+        origin = position + rayNormal * p.frontal;
+        dir = -rayNormal;
         reach = p.frontal + p.rear;
     }
 

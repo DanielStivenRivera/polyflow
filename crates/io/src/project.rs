@@ -187,6 +187,8 @@ pub struct BakeState {
     pub output: Option<String>,
     /// Bake on the CPU even with a GPU.
     pub cpu: bool,
+    /// Split normals at UV seams too, besides edges marked hard.
+    pub hard_uv_seams: bool,
 }
 
 impl Default for BakeState {
@@ -208,6 +210,7 @@ impl Default for BakeState {
             format: crate::image::MapFormat::Png8.name().into(),
             output: None,
             cpu: false,
+            hard_uv_seams: false,
         }
     }
 }

@@ -33,6 +33,8 @@ Bake options (distances in scene units; defaults scale with the sculpt):
   --ao-samples <n>       Occlusion rays per texel (default 32)
   --ao-distance <d>      Occluders further away are ignored (default 25% of the radius)
   --directx              Green down (-Y) in the tangent-space normal map, for Unreal
+  --hard-uv-seams        Split normals at UV seams too, besides the edges marked hard in
+                         Polyflow (which split them always)
   --cpu                  Bake on the CPU even if a GPU is available (the GPU is used by
                          default; both give the same maps)
   --samples <n>          Antialiasing: n x n samples per texel, 1 to 8 (default 1)
@@ -259,6 +261,7 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
     let mut ao_samples = None;
     let mut ao_distance = None;
     let mut directx = false;
+    let mut hard_uv_seams = false;
     let mut force_cpu = false;
     let mut samples = None;
     // `Some(None)`: fill the whole map.
@@ -291,6 +294,7 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
             "--ao-samples" => ao_samples = Some(number(flag)? as u32),
             "--ao-distance" => ao_distance = Some(number(flag)?),
             "--directx" => directx = true,
+            "--hard-uv-seams" => hard_uv_seams = true,
             "--cpu" => force_cpu = true,
             "--samples" => {
                 let n = number(flag)? as u32;
@@ -360,7 +364,8 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
         (None, Some(push)) => Some(polyflow_bake::Cage::automatic(&imported.mesh, push)),
         (None, None) => None,
     };
-    let low = polyflow_bake::BakeMesh::with_cage(&imported.mesh, cage.as_ref());
+    let normals = polyflow_bake::NormalOptions { hard_uv_seams };
+    let low = polyflow_bake::BakeMesh::new(&imported.mesh, cage.as_ref(), normals);
     println!(
         "retopology  {} triangles, prepared in {:.2} s",
         low.triangle_count(),

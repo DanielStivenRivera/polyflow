@@ -43,6 +43,16 @@ All notable changes to Polyflow are documented here. The format follows
   once: 10M triangles in 0.13 s instead of 2 s. The cache follows changes to
   the file, keeps up to 8 GB, and can be cleared from the File menu.
 
+- **Hard edges in bakes**: mark edges hard (K, or *Hard* in the Retopology
+  panel; Shift+K or *Smooth* clears them; with faces selected, the edges
+  around them), and the bake splits the low-poly's normals across them;
+  *Hard edges at UV seams* in the Bake panel (`--hard-uv-seams` in the CLI)
+  splits them where UV islands meet too. The exported low-poly carries the
+  same split normals. Rays still follow the smooth normals, so no detail is
+  lost along a hard edge. Hard edges are drawn in cyan, follow symmetry and
+  undo, survive topology edits, and are saved in projects and retopology
+  OBJ files (as comments other programs skip).
+
 ### Changed
 
 - Delete removes the selection when there is one. Backspace now dissolves

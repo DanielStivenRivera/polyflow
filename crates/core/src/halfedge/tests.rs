@@ -277,7 +277,7 @@ fn op() -> impl Strategy<Value = Op> {
         1 => any::<usize>().prop_map(Op::RemoveFace),
         1 => any::<usize>().prop_map(Op::RemoveVertex),
         1 => (any::<usize>(), any::<[i8; 3]>()).prop_map(|(v, d)| Op::Move(v, d)),
-        3 => (0u8..10, any::<usize>(), any::<usize>()).prop_map(|(kind, a, b)| Op::Topology(kind, a, b)),
+        3 => (0u8..11, any::<usize>(), any::<usize>()).prop_map(|(kind, a, b)| Op::Topology(kind, a, b)),
         2 => Just(Op::Undo),
         1 => Just(Op::Redo),
     ]
@@ -361,6 +361,13 @@ proptest! {
                             })
                         }),
                         9 => border.map(|h| doc.edit("Fill", |m| m.fill_hole(h, fill_corners).map(|_| ()))),
+                        10 => edge.map(|h| {
+                            doc.edit("Toggle hard", |m| {
+                                let hard = !m.is_hard(h.edge());
+                                m.set_hard(h.edge(), hard);
+                                Ok(())
+                            })
+                        }),
                         _ => face.zip(second).map(|(f, g)| {
                             doc.edit("Dissolve faces", |m| m.dissolve_faces(&[f, g]).map(|_| ()))
                         }),
@@ -956,4 +963,67 @@ fn closed_borders_bridge_and_holes_fill() {
     for k in 0..4 {
         assert!(mesh.find_halfedge(r1[k], r2[k]).is_some());
     }
+}
+
+#[test]
+fn hard_edges_are_undoable_and_survive_topology_edits() {
+    let n = 3;
+    let mut doc = MeshDocument::new(uv_grid(n));
+    let edge = |m: &HalfEdgeMesh, a, b| m.find_halfedge(a, b).unwrap().edge();
+    // The middle column of vertical edges, x = 1.
+    let column: Vec<(VertexId, VertexId)> =
+        (0..n).map(|j| (at(n, 1, j), at(n, 1, j + 1))).collect();
+    doc.edit("Mark hard", |m| {
+        for &(a, b) in &column {
+            let e = edge(m, a, b);
+            m.set_hard(e, true);
+        }
+        Ok::<_, TopologyError>(())
+    })
+    .unwrap();
+    assert_eq!(doc.mesh().hard_edges().count(), 3);
+    doc.undo();
+    assert!(!doc.mesh().has_hard_edges());
+    doc.redo();
+    assert_eq!(doc.mesh().hard_edges().count(), 3);
+
+    // A loop across the column (through a ring of vertical edges) splits
+    // one of its edges in two.
+    let h = doc.mesh().find_halfedge(at(n, 1, 0), at(n, 1, 1)).unwrap();
+    doc.edit("Insert loop", |m| m.insert_loop(h, 0.5)).unwrap();
+    doc.mesh().validate().unwrap();
+    assert_eq!(
+        doc.mesh().hard_edges().count(),
+        4,
+        "the split edge's halves stay hard"
+    );
+    doc.undo();
+
+    // Splitting a hard edge keeps both halves hard; dissolving the new
+    // vertex joins them back into one hard edge.
+    let h = doc.mesh().find_halfedge(at(n, 1, 0), at(n, 1, 1)).unwrap();
+    let m = doc.edit("Split", |mesh| mesh.split_edge(h, 0.5)).unwrap();
+    assert!(doc.mesh().is_hard(edge(doc.mesh(), at(n, 1, 0), m)));
+    assert!(doc.mesh().is_hard(edge(doc.mesh(), m, at(n, 1, 1))));
+    doc.edit("Dissolve", |mesh| mesh.dissolve_vertex(m))
+        .unwrap();
+    assert!(
+        doc.mesh()
+            .is_hard(edge(doc.mesh(), at(n, 1, 0), at(n, 1, 1)))
+    );
+
+    // Rebuilt faces keep the hard edges they share with others.
+    let f = doc.mesh().find_halfedge(at(n, 0, 0), at(n, 1, 0)).unwrap();
+    let face = doc.mesh().face_of(f).unwrap();
+    let corners = doc.mesh().face_corners(face);
+    doc.edit("Split face", |mesh| {
+        mesh.split_face(face, corners[0].vertex, corners[2].vertex)
+            .map(|_| ())
+    })
+    .unwrap();
+    assert!(
+        doc.mesh()
+            .is_hard(edge(doc.mesh(), at(n, 1, 0), at(n, 1, 1)))
+    );
+    doc.mesh().validate().unwrap();
 }

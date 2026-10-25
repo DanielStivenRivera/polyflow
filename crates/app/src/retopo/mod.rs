@@ -24,6 +24,8 @@ pub const UV_FACE_COLOR: Rgba8 = Rgba8::new(255, 255, 255, 200);
 pub const NO_UV_FACE_COLOR: Rgba8 = Rgba8::new(255, 60, 200, 110);
 pub const EDGE_COLOR: Rgba8 = Rgba8::new(150, 200, 255, 255);
 pub const BOUNDARY_EDGE_COLOR: Rgba8 = Rgba8::new(255, 255, 255, 255);
+/// Edges marked hard for baking.
+pub const HARD_EDGE_COLOR: Rgba8 = Rgba8::new(80, 235, 255, 255);
 pub const VERTEX_COLOR: Rgba8 = Rgba8::new(225, 238, 255, 255);
 pub const HOVER_COLOR: Rgba8 = Rgba8::new(255, 214, 64, 255);
 pub const HOVER_FACE_COLOR: Rgba8 = Rgba8::new(255, 214, 64, 70);
@@ -352,7 +354,9 @@ fn build_mesh_overlay(mesh: &HalfEdgeMesh, uv_checker: bool, out: &mut Overlay) 
     }
     for e in mesh.edges() {
         let h = e.halfedge(0);
-        let color = if mesh.is_boundary_edge(e) {
+        let color = if mesh.is_hard(e) {
+            HARD_EDGE_COLOR
+        } else if mesh.is_boundary_edge(e) {
             BOUNDARY_EDGE_COLOR
         } else {
             EDGE_COLOR
