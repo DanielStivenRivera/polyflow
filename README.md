@@ -7,8 +7,9 @@ multi-million-triangle sculpts, and bake the sculpt's detail into texture maps
 (normals, AO, height and more). It is built in Rust on Vulkan, with one rule
 above all: stay fast and stable on the heaviest meshes production throws at it.
 
-> **Status:** v0.2.0 preview. Retopology and baking (normal maps and ambient
-> occlusion, on the GPU) work end to end. See the [changelog](CHANGELOG.md)
+> **Status:** v0.3.0 preview. A full retopology toolset (selection, loops,
+> cuts, extrude, bridge, fill) and baking (normal maps and ambient occlusion,
+> on the GPU, with hard edges) work end to end. See the [changelog](CHANGELOG.md)
 > and the [roadmap](docs/DESIGN.md#8-roadmap).
 
 ## Download

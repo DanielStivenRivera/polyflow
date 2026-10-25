@@ -158,7 +158,7 @@ Profiling uses Tracy (CPU + GPU zones).
 |---|---|
 | **v0.1** ✅ | Fast viewer for huge meshes · basic retopo (create, strips, relax, symmetry) · undo/redo · OBJ import/export |
 | **v0.2** ✅ | GPU baking (normal, AO) · UV import · cage · PNG/EXR export |
-| **v0.3** | Full retopo toolset · glTF / FBX / PLY import · sculpt cache · hard edges in bakes (project files and autosave shipped in 0.1.1) |
+| **v0.3** ✅ | Full retopo toolset · glTF / FBX / PLY import · sculpt cache · hard edges in bakes (project files and autosave shipped in 0.1.1) |
 | **v0.4** | Remaining bake maps · CLI batch baking · Python bindings (`pyo3`) |
 | **v1.0** | USD · DCC bridges (Blender, Maya, ZBrush) · stability and polish |
 
@@ -217,7 +217,7 @@ undo step and respects symmetry.
    BVH) so 10M triangles reopen within the 0.5 s budget.
 6. ✅ Hard edges in bakes: normals split at UV island borders or at marked
    edges, baked and exported that way in the low-poly.
-7. Polish and release v0.3.0.
+7. ✅ Polish and release v0.3.0.
 
 ### Selection
 

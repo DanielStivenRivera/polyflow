@@ -6,6 +6,12 @@ All notable changes to Polyflow are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-25
+
+Retopology: a full toolset to retopologize a whole character without leaving
+Polyflow, sculpts from PLY, glTF and FBX that reopen at once, and hard edges
+in bakes.
+
 ### Added
 
 - **Selection**: the new **Select** tool (S) picks vertices, edges or faces
@@ -57,6 +63,22 @@ All notable changes to Polyflow are documented here. The format follows
 
 - Delete removes the selection when there is one. Backspace now dissolves
   the selection instead of deleting what is under the cursor.
+
+### Fixed
+
+- `polyflow-cli bake` creates the output folder when it does not exist,
+  instead of failing after the bake.
+
+### Known limitations
+
+- The retopology has no UV unwrapping: unwrap it in another program and
+  import it. Faces without UVs are left out of the bake.
+- Maps: tangent- and object-space normals and AO; height, cavity, curvature
+  and ID maps come in 0.4.
+- The low-poly as baked is exported as OBJ and glTF; FBX export waits for a
+  solid open-source writer.
+- The baked low-poly and the maps' preview reflect the retopology at the time
+  of the bake.
 
 ## [0.2.0] - 2026-10-24
 
@@ -168,6 +190,7 @@ First public preview: load a sculpt, retopologize it by hand, save the result.
 - Missing retopology tools: selection, edge loops, bridge, extrude.
 - No native project format: save the retopology as OBJ (added in 0.1.1).
 
+[0.3.0]: https://github.com/DanielStivenRivera/polyflow/releases/tag/v0.3.0
 [0.2.0]: https://github.com/DanielStivenRivera/polyflow/releases/tag/v0.2.0
 [0.1.1]: https://github.com/DanielStivenRivera/polyflow/releases/tag/v0.1.1
 [0.1.0]: https://github.com/DanielStivenRivera/polyflow/releases/tag/v0.1.0

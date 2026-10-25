@@ -466,6 +466,9 @@ fn bake(sculpt: PathBuf, retopo: PathBuf, out: PathBuf, options: &[&str]) -> any
         ("object", &baked.object_normal),
         ("ao", &baked.ambient_occlusion),
     ];
+    if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
     let mut written: Vec<(&str, std::path::PathBuf)> = Vec::new();
     for (suffix, map) in maps {
         let Some(map) = map else { continue };
