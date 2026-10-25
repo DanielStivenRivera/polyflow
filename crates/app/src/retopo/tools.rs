@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use polyflow_core::glam::{Vec2, Vec3};
-use polyflow_core::halfedge::{EdgeId, FaceId, VertexId};
+use polyflow_core::halfedge::{EdgeId, FaceId, HalfEdgeId, HalfEdgeMesh, TopologyError, VertexId};
 use polyflow_render::{Overlay, OverlayLine, OverlayPoint, OverlayVertex};
 use winit::event::MouseButton;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -36,14 +36,18 @@ pub enum ToolKind {
     Create,
     Draw,
     Relax,
+    Loop,
+    Cut,
 }
 
 impl ToolKind {
-    pub const ALL: [ToolKind; 4] = [
+    pub const ALL: [ToolKind; 6] = [
         ToolKind::Select,
         ToolKind::Create,
         ToolKind::Draw,
         ToolKind::Relax,
+        ToolKind::Loop,
+        ToolKind::Cut,
     ];
 
     pub fn label(self) -> &'static str {
@@ -52,6 +56,8 @@ impl ToolKind {
             ToolKind::Create => "Create",
             ToolKind::Draw => "Draw",
             ToolKind::Relax => "Relax",
+            ToolKind::Loop => "Loop",
+            ToolKind::Cut => "Cut",
         }
     }
 
@@ -61,8 +67,25 @@ impl ToolKind {
             ToolKind::Create => "Q",
             ToolKind::Draw => "D",
             ToolKind::Relax => "R",
+            ToolKind::Loop => "I",
+            ToolKind::Cut => "C",
         }
     }
+}
+
+/// Edits of the selection, from keys or the retopology panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    /// Delete the selection (Delete), or what is under the cursor.
+    Delete,
+    /// Dissolve the selection (Backspace).
+    Dissolve,
+    /// Merge the selected vertices at their center (M).
+    Merge,
+    /// Split the face between two selected vertices (J).
+    Connect,
+    /// Rotate the selected edges (T).
+    Rotate,
 }
 
 /// Everything a tool needs to know about the frame.
@@ -108,6 +131,8 @@ pub struct Tools {
     pub lasso: bool,
     hover_vertex: Option<VertexId>,
     hover_edge: Option<EdgeId>,
+    /// Where along `hover_edge`'s first half-edge the cursor is.
+    hover_edge_t: f32,
     hover_face: Option<FaceId>,
     /// Surface point under the cursor, for previews.
     hover_surface: Option<SurfacePoint>,
@@ -127,6 +152,14 @@ pub struct Tools {
     region: Option<Region>,
     /// Select: time and place of the last click, for double-clicks.
     last_click: Option<(Instant, Vec2)>,
+    /// Loop: the edge being slid along while the button is down.
+    sliding: Option<HalfEdgeId>,
+    /// Loop: the half-edge and fraction the loop would be inserted at.
+    loop_at: Option<(HalfEdgeId, f32)>,
+    /// Loop: insert in the middle of the ring's edges (Shift held).
+    even: bool,
+    /// Cut: the vertex the next cut starts from.
+    cut_from: Option<VertexId>,
 }
 
 impl Default for Tools {
@@ -138,6 +171,7 @@ impl Default for Tools {
             lasso: false,
             hover_vertex: None,
             hover_edge: None,
+            hover_edge_t: 0.5,
             hover_face: None,
             hover_surface: None,
             pending: Vec::new(),
@@ -149,6 +183,10 @@ impl Default for Tools {
             brushing: None,
             region: None,
             last_click: None,
+            sliding: None,
+            loop_at: None,
+            even: false,
+            cut_from: None,
         }
     }
 }
@@ -171,13 +209,23 @@ impl Tools {
 
     /// Whether a tool gesture is in progress (camera input should wait).
     pub fn is_busy(&self) -> bool {
-        self.drag.is_some() || self.drawing || self.brushing.is_some() || self.region.is_some()
+        self.drag.is_some()
+            || self.drawing
+            || self.brushing.is_some()
+            || self.region.is_some()
+            || self.sliding.is_some()
     }
 
     /// Abandons the current gesture or face in progress.
     fn cancel(&mut self) -> bool {
-        let had_something = !self.pending.is_empty() || self.drawing || self.region.is_some();
+        let had_something = !self.pending.is_empty()
+            || self.drawing
+            || self.region.is_some()
+            || self.sliding.is_some()
+            || self.cut_from.is_some();
         self.pending.clear();
+        self.sliding = None;
+        self.cut_from = None;
         self.stroke.clear();
         self.drawing = false;
         self.region = None;
@@ -207,33 +255,51 @@ impl Tools {
     /// Recomputes what is under the cursor.
     pub fn update_hover(&mut self, retopo: &Retopo, input: &ToolInput<'_>) {
         let mesh = retopo.mesh();
+        self.even = input.modifiers.shift_key();
         self.pending.retain(|&v| mesh.contains_vertex(v));
         self.hover_surface = input.surface.raycast(&input.view, input.cursor);
-        // The Select tool shows only elements of the selection mode.
-        let mode = (self.active == ToolKind::Select).then(|| retopo.selection.mode());
-        self.hover_vertex = match mode {
-            None | Some(SelectMode::Vertex) => pick::vertex(
+        // What each tool works on; the Select tool, on the selection mode.
+        let (vertices, edges, faces) = match self.active {
+            ToolKind::Select => match retopo.selection.mode() {
+                SelectMode::Vertex => (true, false, false),
+                SelectMode::Edge => (false, true, false),
+                SelectMode::Face => (false, false, true),
+            },
+            ToolKind::Loop => (false, true, false),
+            ToolKind::Cut => (true, true, false),
+            _ => (true, false, true),
+        };
+        self.hover_vertex = if vertices {
+            pick::vertex(
                 mesh,
                 &input.surface,
                 &input.view,
                 input.cursor,
                 PICK_RADIUS,
                 retopo.x_ray,
-            ),
-            _ => None,
+            )
+        } else {
+            None
         };
-        self.hover_edge = match mode {
-            Some(SelectMode::Edge) => pick::edge(
+        self.hover_edge = if edges && self.hover_vertex.is_none() {
+            pick::edge(
                 mesh,
                 &input.surface,
                 &input.view,
                 input.cursor,
                 PICK_RADIUS,
                 retopo.x_ray,
-            ),
-            _ => None,
+            )
+        } else {
+            None
         };
-        let faces = matches!(mode, None | Some(SelectMode::Face));
+        if let Some(e) = self.hover_edge {
+            self.hover_edge_t =
+                pick::halfedge_param(mesh, &input.view, e.halfedge(0), input.cursor);
+        }
+        if self.active == ToolKind::Loop && self.sliding.is_none() {
+            self.loop_at = self.hover_edge.map(|e| (e.halfedge(0), self.hover_edge_t));
+        }
         self.hover_face = if self.hover_vertex.is_none() && faces {
             pick::face(
                 mesh,
@@ -282,6 +348,10 @@ impl Tools {
                 self.relax_under_brush(retopo, input, gesture);
                 true
             }
+            (ToolKind::Loop, MouseButton::Left) => {
+                self.sliding = self.loop_at.map(|(h, _)| h);
+                true
+            }
             (_, MouseButton::Left | MouseButton::Right) => {
                 self.press = Some((button, input.cursor));
                 true
@@ -291,6 +361,16 @@ impl Tools {
     }
 
     pub fn mouse_move(&mut self, retopo: &mut Retopo, input: &ToolInput<'_>) {
+        if let Some(h) = self.sliding {
+            if !retopo.mesh().contains_halfedge(h) {
+                self.sliding = None;
+                return;
+            }
+            self.even = input.modifiers.shift_key();
+            let t = pick::halfedge_param(retopo.mesh(), &input.view, h, input.cursor);
+            self.loop_at = Some((h, t));
+            return;
+        }
         if self.active == ToolKind::Select {
             match (&mut self.region, self.press) {
                 (Some(Region::Box(_, end)), _) => *end = input.cursor,
@@ -323,7 +403,7 @@ impl Tools {
             }
             if let Some(hit) = input.surface.raycast(&input.view, input.cursor) {
                 let symmetry = retopo.symmetry();
-                let _ = retopo.doc.edit_merged("Move vertex", gesture, |m| {
+                let _ = retopo.edit_merged("Move vertex", gesture, |m| {
                     edit::move_vertex(m, symmetry.as_ref(), v, hit.position);
                     Ok::<_, ()>(())
                 });
@@ -348,7 +428,13 @@ impl Tools {
 
     pub fn mouse_up(&mut self, retopo: &mut Retopo, input: &ToolInput<'_>, button: MouseButton) {
         if button == MouseButton::Left {
-            if self.drag.take().is_some() {
+            if let Some((v, gesture)) = self.drag.take() {
+                self.weld(retopo, input, v, gesture);
+                self.update_hover(retopo, input);
+                return;
+            }
+            if self.sliding.take().is_some() {
+                self.insert_loop(retopo, input);
                 self.update_hover(retopo, input);
                 return;
             }
@@ -389,6 +475,7 @@ impl Tools {
             MouseButton::Left if self.active == ToolKind::Select => {
                 self.select_click(retopo, input)
             }
+            MouseButton::Left if self.active == ToolKind::Cut => self.cut_click(retopo, input),
             MouseButton::Right => {
                 self.cancel();
             }
@@ -425,6 +512,18 @@ impl Tools {
                 self.grow_loops(retopo, input.modifiers.shift_key());
                 return true;
             }
+            Some("m") => {
+                self.run(retopo, input, Command::Merge);
+                return true;
+            }
+            Some("j") => {
+                self.run(retopo, input, Command::Connect);
+                return true;
+            }
+            Some("t") => {
+                self.run(retopo, input, Command::Rotate);
+                return true;
+            }
             _ => {}
         }
         match key {
@@ -434,26 +533,102 @@ impl Tools {
                 }
                 true
             }
-            Key::Named(NamedKey::Delete | NamedKey::Backspace) => {
-                self.update_hover(retopo, input);
-                let symmetry = retopo.symmetry();
-                let result = if let Some(v) = self.hover_vertex {
-                    retopo.doc.edit("Delete vertex", |m| {
-                        edit::remove_vertex(m, symmetry.as_ref(), v)
-                    })
-                } else if let Some(f) = self.hover_face {
-                    retopo.doc.edit("Delete face", |m| {
-                        edit::remove_face(m, symmetry.as_ref(), f)
-                    })
-                } else {
-                    return false;
-                };
-                self.report(result);
-                self.update_hover(retopo, input);
-                true
-            }
+            Key::Named(NamedKey::Delete) => self.run(retopo, input, Command::Delete),
+            Key::Named(NamedKey::Backspace) => self.run(retopo, input, Command::Dissolve),
             _ => false,
         }
+    }
+
+    /// Runs an edit command on the selection. Returns false if there was
+    /// nothing to do it on.
+    pub fn run(&mut self, retopo: &mut Retopo, input: &ToolInput<'_>, command: Command) -> bool {
+        self.update_hover(retopo, input);
+        let symmetry = retopo.symmetry();
+        let sym = symmetry.as_ref();
+        let selection = retopo.selection.clone();
+        let mode = selection.mode();
+        let result: Result<(), TopologyError> = match command {
+            Command::Delete if !selection.is_empty() => {
+                retopo.edit("Delete", |m| edit::delete_selection(m, sym, &selection))
+            }
+            Command::Delete => {
+                if let Some(v) = self.hover_vertex {
+                    retopo.edit("Delete vertex", |m| edit::remove_vertex(m, sym, v))
+                } else if let Some(f) = self.hover_face {
+                    retopo.edit("Delete face", |m| edit::remove_face(m, sym, f))
+                } else {
+                    return false;
+                }
+            }
+            Command::Dissolve if selection.is_empty() => {
+                self.status = Some("Select vertices, edges or faces to dissolve".into());
+                return false;
+            }
+            Command::Dissolve => {
+                retopo.edit("Dissolve", |m| edit::dissolve_selection(m, sym, &selection))
+            }
+            Command::Merge => {
+                let vertices = selected_vertices(retopo.mesh(), &selection);
+                if vertices.len() < 2 {
+                    self.status = Some("Select two or more vertices to merge".into());
+                    return false;
+                }
+                let mesh = retopo.mesh();
+                let center = vertices.iter().map(|&v| mesh.position(v)).sum::<Vec3>()
+                    / vertices.len() as f32;
+                let position = input.surface.snap(center);
+                let result = retopo.edit("Merge vertices", |m| {
+                    edit::merge_vertices(m, sym, &vertices, position)
+                });
+                if let Ok(kept) = result
+                    && mode == SelectMode::Vertex
+                {
+                    retopo
+                        .selection
+                        .apply(SelectOp::Replace, Elements::Vertices(vec![kept]));
+                }
+                result.map(|_| ())
+            }
+            Command::Connect => {
+                let vertices = selected_vertices(retopo.mesh(), &selection);
+                let [a, b] = vertices[..] else {
+                    self.status = Some("Select the two vertices to connect".into());
+                    return false;
+                };
+                let result = retopo.edit("Connect vertices", |m| edit::connect(m, sym, a, b));
+                if let Ok(e) = result {
+                    retopo
+                        .selection
+                        .set_mode(retopo.doc.mesh(), SelectMode::Edge);
+                    retopo
+                        .selection
+                        .apply(SelectOp::Replace, Elements::Edges(vec![e]));
+                }
+                result.map(|_| ())
+            }
+            Command::Rotate => {
+                let edges: Vec<EdgeId> = match mode {
+                    SelectMode::Edge => selection.edges().iter().copied().collect(),
+                    _ => self.hover_edge.into_iter().collect(),
+                };
+                if edges.is_empty() {
+                    self.status = Some("Select the edges to rotate".into());
+                    return false;
+                }
+                let result = retopo.edit("Rotate edges", |m| edit::rotate_edges(m, sym, &edges));
+                if let Ok(turned) = &result
+                    && mode == SelectMode::Edge
+                {
+                    retopo
+                        .selection
+                        .apply(SelectOp::Replace, Elements::Edges(turned.clone()));
+                }
+                result.map(|_| ())
+            }
+        };
+        self.report(result);
+        self.update_hover(retopo, input);
+        true
     }
 
     // ---- Select ------------------------------------------------------------
@@ -543,7 +718,133 @@ impl Tools {
         })
     }
 
+    // ---- Loop --------------------------------------------------------------
+
+    /// The fraction to insert the loop at, given the cursor's.
+    fn loop_t(&self, t: f32) -> f32 {
+        if self.even { 0.5 } else { t.clamp(0.02, 0.98) }
+    }
+
+    fn insert_loop(&mut self, retopo: &mut Retopo, input: &ToolInput<'_>) {
+        let Some((h, t)) = self.loop_at.take() else {
+            return;
+        };
+        let t = self.loop_t(t);
+        let symmetry = retopo.symmetry();
+        let surface = input.surface;
+        let result = retopo.edit("Insert edge loop", |m| {
+            let new = edit::insert_loop(m, symmetry.as_ref(), h, t)?;
+            snap_vertices(m, symmetry.as_ref(), &surface, &new);
+            Ok::<_, TopologyError>(())
+        });
+        self.report(result);
+    }
+
+    /// Positions of the loop the tool would insert: one polyline per ring.
+    fn loop_preview(&self, retopo: &Retopo) -> Vec<(Vec<Vec3>, bool)> {
+        let mesh = retopo.mesh();
+        let Some((h, t)) = self.loop_at.filter(|(h, _)| mesh.contains_halfedge(*h)) else {
+            return Vec::new();
+        };
+        let symmetry = retopo.symmetry();
+        let (t, mirror) = edit::loop_plan(mesh, symmetry.as_ref(), h, self.loop_t(t));
+        std::iter::once(h)
+            .chain(mirror)
+            .map(|h| {
+                let (ring, closed) = mesh.ring_halfedges(h);
+                let points = ring
+                    .iter()
+                    .map(|&r| {
+                        mesh.position(mesh.origin(r))
+                            .lerp(mesh.position(mesh.target(r)), t)
+                    })
+                    .collect();
+                (points, closed)
+            })
+            .collect()
+    }
+
+    // ---- Cut ---------------------------------------------------------------
+
+    /// Splits the edge under the cursor (or takes the vertex there) and joins
+    /// it to the previous cut point across the face they share.
+    fn cut_click(&mut self, retopo: &mut Retopo, input: &ToolInput<'_>) {
+        let target = match (self.hover_vertex, self.hover_edge) {
+            (Some(v), _) => Ok(v),
+            (None, Some(e)) => Err((e.halfedge(0), self.hover_edge_t.clamp(0.0, 1.0))),
+            (None, None) => {
+                self.cut_from = None;
+                return;
+            }
+        };
+        let from = self.cut_from.filter(|&v| retopo.mesh().contains_vertex(v));
+        let symmetry = retopo.symmetry();
+        let sym = symmetry.as_ref();
+        let surface = input.surface;
+        let mut joined = false;
+        let result = retopo.edit("Cut", |m| {
+            let v = match target {
+                Ok(v) => v,
+                Err((h, t)) => {
+                    let v = edit::split_edge(m, sym, h, t)?;
+                    snap_vertices(m, sym, &surface, &[v]);
+                    v
+                }
+            };
+            if let Some(from) = from.filter(|&f| f != v) {
+                joined = edit::connect(m, sym, from, v).is_ok();
+            }
+            Ok::<_, TopologyError>(v)
+        });
+        match result {
+            Ok(v) => {
+                self.status = (from.is_some() && !joined && target.is_err())
+                    .then(|| "The cut points do not share a face; starting a new cut".into());
+                self.cut_from = Some(v);
+            }
+            Err(e) => self.status = Some(e.to_string()),
+        }
+        self.update_hover(retopo, input);
+    }
+
+    /// Where the next cut point would go.
+    fn cut_target(&self, mesh: &HalfEdgeMesh) -> Option<Vec3> {
+        if let Some(v) = self.hover_vertex.filter(|&v| mesh.contains_vertex(v)) {
+            return Some(mesh.position(v));
+        }
+        let h = self.hover_edge?.halfedge(0);
+        mesh.contains_halfedge(h).then(|| {
+            mesh.position(mesh.origin(h))
+                .lerp(mesh.position(mesh.target(h)), self.hover_edge_t)
+        })
+    }
+
     // ---- Create ------------------------------------------------------------
+
+    /// After dragging `v` onto another vertex, merges them into that one.
+    fn weld(&mut self, retopo: &mut Retopo, input: &ToolInput<'_>, v: VertexId, gesture: u64) {
+        let mesh = retopo.mesh();
+        if !mesh.contains_vertex(v) {
+            return;
+        }
+        let Some(target) = pick::vertex_except(
+            mesh,
+            &input.surface,
+            &input.view,
+            input.cursor,
+            PICK_RADIUS,
+            retopo.x_ray,
+            Some(v),
+        ) else {
+            return;
+        };
+        let position = mesh.position(target);
+        let symmetry = retopo.symmetry();
+        let result = retopo.edit_merged("Weld vertices", gesture, |m| {
+            edit::merge_vertices(m, symmetry.as_ref(), &[target, v], position)
+        });
+        self.report(result.map(|_| ()));
+    }
 
     fn create_click(&mut self, retopo: &mut Retopo, input: &ToolInput<'_>) {
         let symmetry = retopo.symmetry();
@@ -556,7 +857,7 @@ impl Tools {
             Some(v) => v,
             None => match self.hover_surface {
                 Some(hit) => {
-                    let result = retopo.doc.edit("Add vertex", |m| {
+                    let result = retopo.edit("Add vertex", |m| {
                         Ok::<_, ()>(edit::add_vertex(m, symmetry.as_ref(), hit.position))
                     });
                     match result {
@@ -584,7 +885,7 @@ impl Tools {
             vertices.iter().map(|&v| mesh.position(v)).sum::<Vec3>() / vertices.len() as f32;
         let facing = input.view.eye() - centroid;
         let symmetry = retopo.symmetry();
-        let result = retopo.doc.edit("Add face", |m| {
+        let result = retopo.edit("Add face", |m| {
             edit::add_face(m, symmetry.as_ref(), &vertices, facing)
         });
         self.report(result.map(|_| ()));
@@ -606,7 +907,7 @@ impl Tools {
         let view = input.view;
         let x_ray = retopo.x_ray;
         let mut skipped = 0;
-        let result = retopo.doc.edit("Draw strip", |m| {
+        let result = retopo.edit("Draw strip", |m| {
             // Reuse visible vertices near a strip corner, so strips connect.
             let corner = |m: &mut polyflow_core::halfedge::HalfEdgeMesh, p: Vec3| -> VertexId {
                 let p = surface.snap(p);
@@ -740,6 +1041,40 @@ impl Tools {
                 size: VERTEX_SIZE + 5.0,
             });
         }
+        for (points, closed) in self.loop_preview(retopo) {
+            let n = points.len();
+            let segments = if closed { n } else { n.saturating_sub(1) };
+            for i in 0..segments {
+                out.lines.push(OverlayLine {
+                    a: points[i],
+                    b: points[(i + 1) % n],
+                    color: PENDING_COLOR,
+                });
+            }
+            for p in points {
+                out.points.push(OverlayPoint {
+                    position: p,
+                    color: PENDING_COLOR,
+                    size: VERTEX_SIZE,
+                });
+            }
+        }
+        if self.active == ToolKind::Cut
+            && let Some(target) = self.cut_target(mesh)
+        {
+            if let Some(from) = self.cut_from.filter(|&v| mesh.contains_vertex(v)) {
+                out.lines.push(OverlayLine {
+                    a: mesh.position(from),
+                    b: target,
+                    color: PENDING_COLOR,
+                });
+            }
+            out.points.push(OverlayPoint {
+                position: target,
+                color: HOVER_COLOR,
+                size: VERTEX_SIZE + 3.0,
+            });
+        }
         for w in self.stroke.windows(2) {
             out.lines.push(OverlayLine {
                 a: w[0].position,
@@ -751,6 +1086,41 @@ impl Tools {
 
     fn report<E: std::fmt::Display>(&mut self, result: Result<(), E>) {
         self.status = result.err().map(|e| e.to_string());
+    }
+}
+
+/// The selected vertices, or the vertices of the selected edges or faces.
+fn selected_vertices(mesh: &HalfEdgeMesh, selection: &selection::Selection) -> Vec<VertexId> {
+    let mut vertices: Vec<VertexId> = match selection.mode() {
+        SelectMode::Vertex => selection.vertices().iter().copied().collect(),
+        SelectMode::Edge => selection
+            .edges()
+            .iter()
+            .flat_map(|e| [mesh.origin(e.halfedge(0)), mesh.origin(e.halfedge(1))])
+            .collect(),
+        SelectMode::Face => selection
+            .faces()
+            .iter()
+            .flat_map(|&f| mesh.face_vertices(f).collect::<Vec<_>>())
+            .collect(),
+    };
+    vertices.sort_unstable();
+    vertices.dedup();
+    vertices
+}
+
+/// Moves new vertices onto the surface, with their mirror partners.
+fn snap_vertices(
+    mesh: &mut HalfEdgeMesh,
+    symmetry: Option<&super::symmetry::Symmetry>,
+    surface: &Surface<'_>,
+    vertices: &[VertexId],
+) {
+    for &v in vertices {
+        if mesh.contains_vertex(v) {
+            let p = surface.snap(mesh.position(v));
+            edit::move_vertex(mesh, symmetry, v, p);
+        }
     }
 }
 
@@ -811,8 +1181,8 @@ pub fn relax(
         Ok::<_, ()>(())
     };
     let _ = match gesture {
-        Some(key) => retopo.doc.edit_merged("Relax", key, apply),
-        None => retopo.doc.edit("Relax", apply),
+        Some(key) => retopo.edit_merged("Relax", key, apply),
+        None => retopo.edit("Relax", apply),
     };
 }
 
@@ -875,6 +1245,153 @@ mod tests {
             assert!(sym.partner(mesh, v).is_some(), "{p} lost its partner");
         }
         assert_eq!(retopo.doc.undo_name(), Some("Relax"));
+    }
+
+    /// A 3x3 grid of unit quads on the XZ plane, centered on the origin.
+    fn grid_retopo() -> Retopo {
+        let mut retopo = Retopo::default();
+        retopo
+            .edit("Grid", |m: &mut HalfEdgeMesh| {
+                let ids: Vec<VertexId> = (0..16)
+                    .map(|k| {
+                        let (i, j) = ((k % 4) as f32, (k / 4) as f32);
+                        m.add_vertex(Vec3::new(i - 1.5, 0.0, j - 1.5))
+                    })
+                    .collect();
+                for j in 0..3 {
+                    for i in 0..3 {
+                        let k = j * 4 + i;
+                        let quad = [ids[k], ids[k + 1], ids[k + 5], ids[k + 4]];
+                        edit::add_face_facing(m, &quad, Vec3::Y).unwrap();
+                    }
+                }
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        retopo
+    }
+
+    fn top_view() -> ViewInfo {
+        ViewInfo {
+            camera: polyflow_core::camera::OrbitCamera {
+                pitch: 1.2,
+                distance: 8.0,
+                ..Default::default()
+            },
+            viewport: polyflow_render::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+        }
+    }
+
+    #[test]
+    fn topology_tools() {
+        let reference = plane(4.0, 8);
+        let bvh = Bvh::build(&reference);
+        let surface = Surface {
+            mesh: &reference,
+            bvh: &bvh,
+        };
+        let view = top_view();
+        let input = |p: Vec3, modifiers| ToolInput {
+            surface,
+            view,
+            cursor: view.project(p).unwrap(),
+            modifiers,
+        };
+        let none = ModifiersState::empty();
+        let click = |tools: &mut Tools, retopo: &mut Retopo, p: Vec3| {
+            tools.mouse_move(retopo, &input(p, none));
+            tools.mouse_down(retopo, &input(p, none), MouseButton::Left);
+            tools.mouse_up(retopo, &input(p, none), MouseButton::Left);
+        };
+
+        // Loop: press on an edge, slide along it, release.
+        let mut retopo = grid_retopo();
+        let mut tools = Tools::default();
+        tools.select(ToolKind::Loop);
+        let edge_point = |x: f32| Vec3::new(x, 0.0, -1.5);
+        tools.mouse_move(&mut retopo, &input(edge_point(-0.9), none));
+        assert!(
+            !tools.loop_preview(&retopo).is_empty(),
+            "a preview while hovering"
+        );
+        tools.mouse_down(
+            &mut retopo,
+            &input(edge_point(-0.9), none),
+            MouseButton::Left,
+        );
+        tools.mouse_move(&mut retopo, &input(edge_point(-0.75), none));
+        tools.mouse_up(
+            &mut retopo,
+            &input(edge_point(-0.75), none),
+            MouseButton::Left,
+        );
+        let mesh = retopo.mesh();
+        mesh.validate().unwrap();
+        assert_eq!((mesh.vertex_count(), mesh.face_count()), (20, 12));
+        let slid = mesh
+            .vertices()
+            .filter(|&v| (mesh.position(v).x + 0.75).abs() < 0.05)
+            .count();
+        assert_eq!(slid, 4, "the loop went where it was slid to");
+        assert_eq!(retopo.doc.undo_name(), Some("Insert edge loop"));
+
+        // Cut: across the middle face, from the middle of one side to the
+        // middle of the opposite side.
+        let mut retopo = grid_retopo();
+        tools.select(ToolKind::Cut);
+        click(&mut tools, &mut retopo, Vec3::new(0.0, 0.0, -0.5));
+        click(&mut tools, &mut retopo, Vec3::new(0.0, 0.0, 0.5));
+        let mesh = retopo.mesh();
+        mesh.validate().unwrap();
+        assert_eq!((mesh.vertex_count(), mesh.face_count()), (18, 10));
+        assert!(tools.status.is_none(), "{:?}", tools.status);
+
+        // Weld: Ctrl+drag a corner onto its neighbor.
+        let mut retopo = grid_retopo();
+        tools.select(ToolKind::Create);
+        let (from, to) = (Vec3::new(-1.5, 0.0, -1.5), Vec3::new(-0.5, 0.0, -1.5));
+        let ctrl = ModifiersState::CONTROL;
+        tools.mouse_move(&mut retopo, &input(from, ctrl));
+        tools.mouse_down(&mut retopo, &input(from, ctrl), MouseButton::Left);
+        tools.mouse_move(&mut retopo, &input(to, ctrl));
+        tools.mouse_up(&mut retopo, &input(to, ctrl), MouseButton::Left);
+        let mesh = retopo.mesh();
+        mesh.validate().unwrap();
+        assert_eq!(mesh.vertex_count(), 15);
+        assert_eq!(retopo.doc.undo_name(), Some("Weld vertices"));
+        retopo.undo();
+        assert_eq!(
+            retopo.mesh().vertex_count(),
+            16,
+            "drag and weld undo together"
+        );
+        assert!(
+            retopo
+                .mesh()
+                .vertices()
+                .any(|v| retopo.mesh().position(v) == from)
+        );
+
+        // Delete the selection; selected ids of removed faces go with them.
+        let mut retopo = grid_retopo();
+        tools.select(ToolKind::Select);
+        tools.set_select_mode(&mut retopo, &input(from, none), SelectMode::Face);
+        click(&mut tools, &mut retopo, Vec3::ZERO);
+        assert_eq!(retopo.selection.len(), 1);
+        tools.key(
+            &mut retopo,
+            &input(from, none),
+            &Key::Named(NamedKey::Delete),
+        );
+        assert_eq!(retopo.mesh().face_count(), 8);
+        assert!(retopo.selection.is_empty());
+        retopo.undo();
+        assert_eq!(retopo.mesh().face_count(), 9);
     }
 
     #[test]

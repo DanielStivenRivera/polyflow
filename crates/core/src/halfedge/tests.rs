@@ -1,4 +1,6 @@
-use glam::Vec3;
+use std::collections::HashSet;
+
+use glam::{Vec2, Vec3};
 use proptest::prelude::*;
 
 use super::*;
@@ -255,10 +257,16 @@ const N: usize = 4;
 
 #[derive(Debug, Clone)]
 enum Op {
-    Add { cell: usize, shape: u8, flip: bool },
+    Add {
+        cell: usize,
+        shape: u8,
+        flip: bool,
+    },
     RemoveFace(usize),
     RemoveVertex(usize),
     Move(usize, [i8; 3]),
+    /// A topology operation on the k-th edge, vertex or face.
+    Topology(u8, usize, usize),
     Undo,
     Redo,
 }
@@ -269,6 +277,7 @@ fn op() -> impl Strategy<Value = Op> {
         1 => any::<usize>().prop_map(Op::RemoveFace),
         1 => any::<usize>().prop_map(Op::RemoveVertex),
         1 => (any::<usize>(), any::<[i8; 3]>()).prop_map(|(v, d)| Op::Move(v, d)),
+        3 => (0u8..8, any::<usize>(), any::<usize>()).prop_map(|(kind, a, b)| Op::Topology(kind, a, b)),
         2 => Just(Op::Undo),
         1 => Just(Op::Redo),
     ]
@@ -319,6 +328,34 @@ proptest! {
                         doc.edit("Move", |m| { m.set_position(v, p); Ok::<_, TopologyError>(()) }).unwrap();
                     }
                     Ok(())
+                }
+                Op::Topology(kind, a, b) => {
+                    let mesh = doc.mesh();
+                    let edge = mesh.halfedges().nth(a % mesh.halfedges().count().max(1));
+                    let vertex = mesh.vertices().nth(a % mesh.vertex_count().max(1));
+                    let other = mesh.vertices().nth(b % mesh.vertex_count().max(1));
+                    let face = mesh.faces().nth(a % mesh.face_count().max(1));
+                    let t = (b % 7) as f32 / 6.0;
+                    let second = mesh.faces().nth(b % mesh.face_count().max(1));
+                    let face_pair = face.and_then(|f| {
+                        let corners = mesh.face_corners(f);
+                        (corners.len() > 3).then(|| (f, corners[0].vertex, corners[2].vertex))
+                    });
+                    let result = match kind {
+                        0 => edge.map(|h| doc.edit("Split edge", |m| m.split_edge(h, t).map(|_| ()))),
+                        1 => face_pair.map(|(f, x, y)| doc.edit("Split face", |m| m.split_face(f, x, y).map(|_| ()))),
+                        2 => vertex.zip(other).map(|(v, w)| {
+                            doc.edit("Merge", |m| m.merge_vertices(&[v, w], Vec3::ZERO).map(|_| ()))
+                        }),
+                        3 => vertex.map(|v| doc.edit("Dissolve vertex", |m| m.dissolve_vertex(v))),
+                        4 => edge.map(|h| doc.edit("Dissolve edge", |m| m.dissolve_edges(&[h.edge()]))),
+                        5 => edge.map(|h| doc.edit("Rotate edge", |m| m.rotate_edge(h.edge(), b % 2 == 0).map(|_| ()))),
+                        6 => edge.map(|h| doc.edit("Insert loop", |m| m.insert_loop(h, t).map(|_| ()))),
+                        _ => face.zip(second).map(|(f, g)| {
+                            doc.edit("Dissolve faces", |m| m.dissolve_faces(&[f, g]).map(|_| ()))
+                        }),
+                    };
+                    result.unwrap_or(Ok(()))
                 }
                 Op::Undo => { doc.undo(); Ok(()) }
                 Op::Redo => { doc.redo(); Ok(()) }
@@ -559,4 +596,200 @@ fn rings_close_around_a_cube() {
     // Cube corners have three edges: a loop cannot continue through them.
     assert_eq!(mesh.edge_loop(e), vec![e]);
     assert_eq!(mesh.valence(v[0]), 3);
+}
+
+/// A grid whose corners carry UVs equal to their XY position.
+fn uv_grid(n: usize) -> HalfEdgeMesh {
+    let (mut mesh, cells) = grid(n);
+    add_all(&mut mesh, &cells);
+    let faces: Vec<FaceId> = mesh.faces().collect();
+    for f in faces {
+        let uvs: Vec<Vec2> = mesh
+            .face_vertices(f)
+            .map(|v| mesh.position(v).truncate())
+            .collect();
+        mesh.set_face_uvs(f, &uvs);
+    }
+    mesh
+}
+
+/// Every corner's UV is its vertex's XY position.
+fn uvs_follow_positions(mesh: &HalfEdgeMesh) {
+    for f in mesh.faces() {
+        for h in mesh.face_halfedges(f) {
+            let uv = mesh.uv(h).expect("corner keeps a UV");
+            let p = mesh.position(mesh.origin(h)).truncate();
+            assert!(uv.distance(p) < 1e-5, "{uv} at {p}");
+        }
+    }
+}
+
+fn at(n: usize, i: usize, j: usize) -> VertexId {
+    VertexId((j * (n + 1) + i) as u32)
+}
+
+#[test]
+fn split_edges_and_faces() {
+    let n = 2;
+    let mut mesh = uv_grid(n);
+    let h = mesh.find_halfedge(at(n, 1, 0), at(n, 1, 1)).unwrap();
+    let m = mesh.split_edge(h, 0.25).unwrap();
+    mesh.validate().unwrap();
+    assert_eq!(mesh.position(m), Vec3::new(1.0, 0.25, 0.0));
+    assert_eq!(mesh.vertex_faces(m).count(), 2);
+    assert!(
+        mesh.vertex_faces(m)
+            .all(|f| mesh.face_vertices(f).count() == 5)
+    );
+    uvs_follow_positions(&mesh);
+
+    let f = mesh.vertex_faces(at(n, 0, 0)).next().unwrap();
+    mesh.split_face(f, at(n, 0, 0), m).unwrap();
+    mesh.validate().unwrap();
+    assert_eq!(mesh.face_count(), 5);
+    uvs_follow_positions(&mesh);
+    assert!(matches!(
+        mesh.split_face(f, at(n, 0, 0), at(n, 1, 0)),
+        Err(TopologyError::MissingFace(_) | TopologyError::Refused(_))
+    ));
+}
+
+#[test]
+fn merge_vertices_collapses_faces() {
+    let n = 2;
+    let mut mesh = uv_grid(n);
+    let (a, b) = (at(n, 1, 1), at(n, 2, 1));
+    let kept = mesh
+        .merge_vertices(&[a, b], Vec3::new(1.5, 1.0, 0.0))
+        .unwrap();
+    mesh.validate().unwrap();
+    assert_eq!(kept, a);
+    assert!(!mesh.contains_vertex(b));
+    assert_eq!(mesh.vertex_count(), 8);
+    assert_eq!(mesh.face_count(), 4, "two quads became triangles");
+    assert_eq!(mesh.position(a), Vec3::new(1.5, 1.0, 0.0));
+}
+
+#[test]
+fn dissolving() {
+    let n = 4;
+    let mut mesh = uv_grid(n);
+    // A loop across the middle: faces merge in pairs and the loop's inner
+    // vertices, left between two edges, go too.
+    let e = mesh.find_halfedge(at(n, 1, 2), at(n, 2, 2)).unwrap().edge();
+    let row = mesh.edge_loop(e);
+    mesh.dissolve_edges(&row).unwrap();
+    mesh.validate().unwrap();
+    assert_eq!(mesh.face_count(), 12);
+    assert_eq!(mesh.vertex_count(), 22);
+    // Border vertices stay: the two merged faces at the ends keep them.
+    let sides = |k| {
+        mesh.faces()
+            .filter(|&f| mesh.face_vertices(f).count() == k)
+            .count()
+    };
+    assert_eq!((sides(4), sides(5)), (10, 2));
+    uvs_follow_positions(&mesh);
+
+    let mut mesh = uv_grid(n);
+    let v = at(n, 2, 2);
+    mesh.dissolve_vertex(v).unwrap();
+    mesh.validate().unwrap();
+    assert!(!mesh.contains_vertex(v));
+    assert_eq!(mesh.face_count(), 13);
+    assert!(mesh.faces().any(|f| mesh.face_vertices(f).count() == 8));
+    uvs_follow_positions(&mesh);
+
+    // A ring of faces around a hole has no single outline: refused, and
+    // the document rolls back.
+    let mut doc = MeshDocument::new(uv_grid(3));
+    let before = doc.mesh().clone();
+    let center = doc.mesh().vertex_faces(at(3, 1, 1)).collect::<HashSet<_>>();
+    let center = *center
+        .iter()
+        .find(|&&f| doc.mesh().vertex_faces(at(3, 2, 2)).any(|g| g == f))
+        .unwrap();
+    let ring: Vec<FaceId> = doc.mesh().faces().filter(|&f| f != center).collect();
+    assert!(doc.edit("Dissolve", |m| m.dissolve_faces(&ring)).is_err());
+    assert_eq!(doc.mesh(), &before);
+}
+
+#[test]
+fn rotate_edges() {
+    let n = 2;
+    let mut mesh = uv_grid(n);
+    let e = mesh.find_halfedge(at(n, 1, 0), at(n, 1, 1)).unwrap().edge();
+    let turned = mesh.rotate_edge(e, true).unwrap();
+    mesh.validate().unwrap();
+    assert_eq!(mesh.face_count(), 4);
+    assert!(mesh.faces().all(|f| mesh.face_vertices(f).count() == 4));
+    let ends = [turned.halfedge(0), turned.halfedge(1)].map(|h| mesh.origin(h));
+    assert!(!ends.contains(&at(n, 1, 0)) || !ends.contains(&at(n, 1, 1)));
+    uvs_follow_positions(&mesh);
+    let border = mesh.find_halfedge(at(n, 0, 0), at(n, 1, 0)).unwrap().edge();
+    assert!(mesh.rotate_edge(border, true).is_err());
+    // Turning back restores the original edge.
+    let back = mesh.rotate_edge(turned, false).unwrap();
+    assert!(
+        mesh.find_halfedge(at(n, 1, 0), at(n, 1, 1))
+            .is_some_and(|h| h.edge() == back)
+    );
+}
+
+#[test]
+fn insert_loops() {
+    let n = 4;
+    let mut mesh = uv_grid(n);
+    let h = mesh.find_halfedge(at(n, 1, 2), at(n, 2, 2)).unwrap();
+    let new = mesh.insert_loop(h, 0.5).unwrap();
+    mesh.validate().unwrap();
+    assert_eq!(new.len(), n + 1);
+    assert_eq!(mesh.face_count(), n * n + n);
+    assert!(new.iter().all(|&v| mesh.position(v).x == 1.5));
+    assert!(mesh.faces().all(|f| mesh.face_vertices(f).count() == 4));
+    uvs_follow_positions(&mesh);
+
+    // An open ring ending at a triangle: the triangle gets the vertex.
+    let n = 2;
+    let (mut mesh, cells) = grid(n);
+    add_all(&mut mesh, &cells[..3]);
+    let tri = [at(n, 1, 1), at(n, 2, 1), at(n, 2, 2)];
+    mesh.add_face(&tri).unwrap();
+    let h = mesh.find_halfedge(at(n, 1, 0), at(n, 2, 0)).unwrap();
+    mesh.insert_loop(h, 0.3).unwrap();
+    mesh.validate().unwrap();
+    assert!(
+        mesh.faces().any(|f| mesh.face_vertices(f).count() == 4
+            && mesh.face_vertices(f).any(|v| v == at(n, 2, 2)))
+    );
+
+    // A closed ring around a cube.
+    let corners = [
+        [0, 0, 0],
+        [1, 0, 0],
+        [1, 1, 0],
+        [0, 1, 0],
+        [0, 0, 1],
+        [1, 0, 1],
+        [1, 1, 1],
+        [0, 1, 1],
+    ];
+    let quads = [
+        [0, 3, 2, 1],
+        [4, 5, 6, 7],
+        [0, 1, 5, 4],
+        [1, 2, 6, 5],
+        [2, 3, 7, 6],
+        [3, 0, 4, 7],
+    ];
+    let mut mesh = HalfEdgeMesh::new();
+    let v: Vec<VertexId> = corners
+        .iter()
+        .map(|c| mesh.add_vertex(Vec3::from_array(c.map(|x| x as f32))))
+        .collect();
+    add_all(&mut mesh, &quads.map(|q| q.map(|i| v[i])));
+    let h = mesh.find_halfedge(v[0], v[1]).unwrap();
+    assert_eq!(mesh.insert_loop(h, 0.5).unwrap().len(), 4);
+    mesh.validate().unwrap();
+    assert_eq!((mesh.vertex_count(), mesh.face_count()), (12, 10));
 }

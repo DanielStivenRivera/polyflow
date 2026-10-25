@@ -15,6 +15,22 @@ All notable changes to Polyflow are documented here. The format follows
   their rings; A selects or deselects everything, Esc deselects, and the
   panel can also invert the selection. Hidden elements are left out unless
   X-ray is on. The selection stays across tools, edits and undo.
+- **Topology operations** on the selection, from keys or the panel: delete
+  (Delete), dissolve (Backspace: vertices, edges and faces go and the faces
+  around them merge), merge vertices at their center (M), connect two
+  vertices across their face (J) and rotate edges (T).
+- **Loop** tool (I): inserts an edge loop across a ring of quads, previewed
+  under the cursor; drag along the edge to slide it, hold Shift for the
+  middle.
+- **Cut** tool (C): click on edges one after another to cut across faces.
+- Dropping a vertex on another while moving it (Ctrl+drag in Create) welds
+  them, in the same undo step as the move.
+- All of them keep UVs (new corners interpolate them) and follow symmetry.
+
+### Changed
+
+- Delete removes the selection when there is one. Backspace now dissolves
+  the selection instead of deleting what is under the cursor.
 
 ## [0.2.0] - 2026-10-24
 

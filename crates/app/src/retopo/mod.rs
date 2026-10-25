@@ -124,6 +124,45 @@ impl Retopo {
         self.set_imported_cage(None);
     }
 
+    /// Runs an edit as one undo step (see `MeshDocument::edit`), keeping
+    /// the selection to the elements it did not remove or rebuild.
+    pub fn edit<R, E>(
+        &mut self,
+        name: &str,
+        edit: impl FnOnce(&mut HalfEdgeMesh) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let snapshot = self.selection.snapshot(self.doc.mesh());
+        let result = self.doc.edit(name, edit);
+        self.selection.revalidate(self.doc.mesh(), &snapshot);
+        result
+    }
+
+    /// [`Self::edit`], merged into the gesture's undo step (see
+    /// `MeshDocument::edit_merged`).
+    pub fn edit_merged<R, E>(
+        &mut self,
+        name: &str,
+        gesture: u64,
+        edit: impl FnOnce(&mut HalfEdgeMesh) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let snapshot = self.selection.snapshot(self.doc.mesh());
+        let result = self.doc.edit_merged(name, gesture, edit);
+        self.selection.revalidate(self.doc.mesh(), &snapshot);
+        result
+    }
+
+    pub fn undo(&mut self) {
+        let snapshot = self.selection.snapshot(self.doc.mesh());
+        self.doc.undo();
+        self.selection.revalidate(self.doc.mesh(), &snapshot);
+    }
+
+    pub fn redo(&mut self) {
+        let snapshot = self.selection.snapshot(self.doc.mesh());
+        self.doc.redo();
+        self.selection.revalidate(self.doc.mesh(), &snapshot);
+    }
+
     /// The automatic cage's push in scene units.
     pub fn cage_push(&self) -> f32 {
         self.cage_push

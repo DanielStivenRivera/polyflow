@@ -22,6 +22,8 @@ pub enum TopologyError {
     EdgeTaken(VertexId, VertexId),
     #[error("the face would close a fan around a vertex that other faces also touch")]
     PatchRelinkFailed,
+    #[error("{0}")]
+    Refused(&'static str),
 }
 
 impl HalfEdgeMesh {

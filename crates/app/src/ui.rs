@@ -6,7 +6,7 @@ use polyflow_core::glam::Vec2;
 
 use crate::retopo::selection::SelectMode;
 use crate::retopo::symmetry::Axis;
-use crate::retopo::tools::{ToolKind, ToolSettings};
+use crate::retopo::tools::{Command, ToolKind, ToolSettings};
 
 /// Description of the mesh currently displayed.
 #[derive(Debug, Clone)]
@@ -115,6 +115,7 @@ pub struct Actions {
     pub cancel_bake: bool,
     pub choose_bake_output: bool,
     pub select: Option<SelectAction>,
+    pub command: Option<Command>,
 }
 
 /// Selection commands from the retopology panel.
@@ -526,7 +527,7 @@ impl UiState {
 
 fn retopo_panel(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Actions) {
     ui.strong("Retopology");
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         for tool in ToolKind::ALL {
             ui.selectable_value(retopo.tool, tool, tool.label())
                 .on_hover_text(format!("{} ({})", tool_help(tool), tool.shortcut()));
@@ -539,6 +540,12 @@ fn retopo_panel(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Acti
                 ui.radio_value(retopo.lasso, true, "Lasso");
             });
             ui.weak("Click to select, drag for an area; Shift adds, Ctrl removes. Double-click selects a loop.");
+        }
+        ToolKind::Loop => {
+            ui.weak("Hover an edge to preview a loop across its ring; click to insert it, or drag along the edge to slide it first. Hold Shift for the middle.");
+        }
+        ToolKind::Cut => {
+            ui.weak("Click on edges or vertices one after another to cut across the faces between them. Right-click or Esc ends the cut.");
         }
         ToolKind::Create => {
             ui.weak("Click the surface to add vertices; 4 make a quad. Click the first vertex to close a polygon.");
@@ -893,7 +900,7 @@ fn cage_section(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Acti
 }
 
 fn select_section(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Actions) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         for mode in SelectMode::ALL {
             ui.selectable_value(retopo.select_mode, mode, mode.label())
                 .on_hover_text(format!(
@@ -904,7 +911,7 @@ fn select_section(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Ac
         }
         ui.weak(format!("{} selected", group_thousands(retopo.selected)));
     });
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let mut button = |ui: &mut egui::Ui, label: &str, hint: &str, action| {
             if ui.small_button(label).on_hover_text(hint).clicked() {
                 actions.select = Some(action);
@@ -926,16 +933,50 @@ fn select_section(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Ac
             SelectAction::Rings,
         );
     });
+    ui.horizontal_wrapped(|ui| {
+        let mut button = |ui: &mut egui::Ui, label: &str, hint: &str, command| {
+            if ui.small_button(label).on_hover_text(hint).clicked() {
+                actions.command = Some(command);
+            }
+        };
+        button(
+            ui,
+            "Delete",
+            "Delete the selection, with the faces of selected vertices and edges (Delete)",
+            Command::Delete,
+        );
+        button(
+            ui,
+            "Dissolve",
+            "Remove the selection but keep the surface closed: merge the faces around it (Backspace)",
+            Command::Dissolve,
+        );
+        button(ui, "Merge", "Merge the selected vertices at their center (M)", Command::Merge);
+        button(
+            ui,
+            "Connect",
+            "Split the face between the two selected vertices (J)",
+            Command::Connect,
+        );
+        button(
+            ui,
+            "Rotate",
+            "Turn the selected edges to join the next vertices around their faces (T)",
+            Command::Rotate,
+        );
+    });
 }
 
 fn tool_help(tool: ToolKind) -> &'static str {
     match tool {
         ToolKind::Select => "Select vertices, edges or faces by clicking or dragging an area",
         ToolKind::Create => {
-            "Place vertices and build faces. Ctrl+drag moves a vertex, Delete removes what is under the cursor"
+            "Place vertices and build faces. Ctrl+drag moves a vertex (drop it on another to weld them), Delete removes what is under the cursor"
         }
         ToolKind::Draw => "Drag over the surface to draw a strip of quads",
         ToolKind::Relax => "Drag to smooth the retopo mesh, keeping it on the surface",
+        ToolKind::Loop => "Insert an edge loop across a ring of quads",
+        ToolKind::Cut => "Cut faces by clicking on their edges",
     }
 }
 

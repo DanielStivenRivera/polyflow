@@ -205,7 +205,7 @@ undo step and respects symmetry.
 
 1. ✅ Selection: vertices, edges and faces by click, box and lasso; edge loop
    and ring selection.
-2. Topology operations: weld/merge vertices, insert edge loop (with preview
+2. ✅ Topology operations: weld/merge vertices, insert edge loop (with preview
    and slide), cut faces, dissolve vertices and edges, rotate edge, delete
    the selection.
 3. Building tools: extrude borders along the surface, bridge two loops, fill
@@ -233,6 +233,24 @@ and borders, and a border edge selects its whole border; an edge ring crosses
 quads to the opposite edge, and the quads it crosses are a face loop. Box and
 lasso pick visible elements only (all of them with X-ray): vertices inside
 the area, edges with both ends inside, faces with their center inside.
+
+### Topology operations
+
+The operations (`polyflow-core::halfedge::topology`) rebuild the faces they
+touch: they remove them and add their replacements through `add_face`, so
+they inherit its manifold checks instead of rewiring half-edges by hand.
+Corners keep their UVs, and corners of new vertices interpolate them along
+the edge they split, so a retopology unwrapped elsewhere stays bakeable.
+Merged and dissolved faces are found by their outline, which must be a
+single polygon: groups of faces around a hole, or touching only at a corner,
+are refused. A random-edit property test runs them all with undo.
+
+With symmetry, each operation also runs on the mirror image, found by vertex
+partners; an edge rotation turns its mirror the other way, and an edge loop
+across a ring that is its own mirror image the other way round is inserted in
+the middle, the only place that keeps it symmetric. Edits that free element
+slots can hand them to new elements, so the selection drops edges and faces
+whose vertices changed in an edit.
 
 Left for v0.4: height, cavity, curvature and ID maps; batch baking and
 Python bindings. UV unwrapping stays an open question.

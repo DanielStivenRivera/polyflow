@@ -376,7 +376,13 @@ impl AppState {
             }
             WindowEvent::DroppedFile(path) => self.start_job(Job::Open(path)),
             WindowEvent::ModifiersChanged(modifiers) => {
-                self.controller.modifiers = modifiers.state()
+                self.controller.modifiers = modifiers.state();
+                // Some tool previews depend on the modifiers (Loop + Shift).
+                if !self.tools.is_busy() && !self.pointer_over_ui() {
+                    let input = tool_input!(self);
+                    self.tools.update_hover(&self.retopo, &input);
+                }
+                self.window.request_redraw();
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
@@ -482,6 +488,8 @@ impl AppState {
             Some("q") if !ctrl => self.tools.select(ToolKind::Create),
             Some("d") if !ctrl => self.tools.select(ToolKind::Draw),
             Some("r") if !ctrl => self.tools.select(ToolKind::Relax),
+            Some("i") if !ctrl => self.tools.select(ToolKind::Loop),
+            Some("c") if !ctrl => self.tools.select(ToolKind::Cut),
             Some("x") if !ctrl => {
                 self.retopo.symmetry_axis = match self.retopo.symmetry_axis {
                     Some(Axis::X) => None,
@@ -496,14 +504,14 @@ impl AppState {
     }
 
     fn undo(&mut self) {
-        self.retopo.doc.undo();
+        self.retopo.undo();
         self.tools.status = None;
         let input = tool_input!(self);
         self.tools.update_hover(&self.retopo, &input);
     }
 
     fn redo(&mut self) {
-        self.retopo.doc.redo();
+        self.retopo.redo();
         self.tools.status = None;
         let input = tool_input!(self);
         self.tools.update_hover(&self.retopo, &input);
@@ -528,7 +536,7 @@ impl AppState {
     }
 
     fn clear_retopo(&mut self) {
-        let _ = self.retopo.doc.edit("Clear retopology", |m| {
+        let _ = self.retopo.edit("Clear retopology", |m| {
             let faces: Vec<_> = m.faces().collect();
             for f in faces {
                 m.remove_face(f, false)?;
@@ -812,6 +820,10 @@ impl AppState {
             Some(SelectAction::Loops) => self.tools.grow_loops(&mut self.retopo, false),
             Some(SelectAction::Rings) => self.tools.grow_loops(&mut self.retopo, true),
             None => {}
+        }
+        if let Some(command) = actions.command {
+            let input = tool_input!(self);
+            self.tools.run(&mut self.retopo, &input, command);
         }
         self.tools.overlay(&self.retopo, &mut self.tool_overlay);
         let x_ray = self.retopo.x_ray;

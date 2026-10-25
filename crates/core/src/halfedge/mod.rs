@@ -31,11 +31,13 @@ mod loops;
 mod ops;
 #[cfg(test)]
 mod tests;
+mod topology;
 mod validate;
 
 use glam::{Vec2, Vec3};
 
 pub use ops::TopologyError;
+pub use topology::Corner;
 
 macro_rules! id_type {
     ($(#[$doc:meta])* $name:ident) => {

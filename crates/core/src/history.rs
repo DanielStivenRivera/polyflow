@@ -115,6 +115,11 @@ impl MeshDocument {
                 .is_some_and(|top| top.merge_key == merge_key);
         if merge {
             let top = self.undo.last_mut().expect("checked above");
+            // The gesture is named for its last part (a drag that ends in a
+            // weld is a weld).
+            if top.name != name {
+                top.name = name.to_owned();
+            }
             top.changes.extend(changes);
             top.changes = compact(std::mem::take(&mut top.changes));
             if top.changes.is_empty() {

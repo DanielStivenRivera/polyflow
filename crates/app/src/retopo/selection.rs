@@ -53,6 +53,14 @@ pub enum Elements {
     Faces(Vec<FaceId>),
 }
 
+/// What the selected edges and faces were made of, to tell after an edit
+/// whether an id still names the same element (see [`Selection::revalidate`]).
+#[derive(Debug, Clone, Default)]
+pub struct Snapshot {
+    edges: Vec<(EdgeId, [VertexId; 2])>,
+    faces: Vec<(FaceId, Vec<VertexId>)>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Selection {
     mode: SelectMode,
@@ -217,6 +225,35 @@ impl Selection {
         self.generation += 1;
     }
 
+    /// Records what the selected edges and faces are made of.
+    pub fn snapshot(&self, mesh: &HalfEdgeMesh) -> Snapshot {
+        Snapshot {
+            edges: self.edges.iter().map(|&e| (e, edge_key(mesh, e))).collect(),
+            faces: self.faces.iter().map(|&f| (f, face_key(mesh, f))).collect(),
+        }
+    }
+
+    /// Drops edges and faces that were removed or rebuilt since `snapshot`:
+    /// an edit can free an element's slot and give it to a new element, which
+    /// must not inherit the selection.
+    pub fn revalidate(&mut self, mesh: &HalfEdgeMesh, snapshot: &Snapshot) {
+        self.prune(mesh);
+        let before = self.len();
+        for (e, key) in &snapshot.edges {
+            if self.edges.contains(e) && edge_key(mesh, *e) != *key {
+                self.edges.remove(e);
+            }
+        }
+        for (f, key) in &snapshot.faces {
+            if self.faces.contains(f) && face_key(mesh, *f) != *key {
+                self.faces.remove(f);
+            }
+        }
+        if self.len() != before {
+            self.generation += 1;
+        }
+    }
+
     /// Drops removed elements. Call whenever the mesh changed.
     pub fn prune(&mut self, mesh: &HalfEdgeMesh) {
         let before = self.len();
@@ -261,6 +298,18 @@ impl Selection {
             self.apply(SelectOp::Add, elements);
         }
     }
+}
+
+fn edge_key(mesh: &HalfEdgeMesh, e: EdgeId) -> [VertexId; 2] {
+    let mut ends = [mesh.origin(e.halfedge(0)), mesh.origin(e.halfedge(1))];
+    ends.sort_unstable();
+    ends
+}
+
+fn face_key(mesh: &HalfEdgeMesh, f: FaceId) -> Vec<VertexId> {
+    let mut vertices: Vec<VertexId> = mesh.face_vertices(f).collect();
+    vertices.sort_unstable();
+    vertices
 }
 
 /// The loop through `e` as elements of `mode`: in vertex and edge modes, the

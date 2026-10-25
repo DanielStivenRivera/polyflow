@@ -57,14 +57,22 @@ F to frame the mesh.
 | Tool | Use |
 |---|---|
 | **Select** (S) | Click a vertex, edge or face to select it, or drag a box or a lasso; Shift adds, Ctrl removes. Double-click selects the loop under the cursor. |
-| **Create** (Q) | Click the surface to place vertices, or click existing ones; four make a quad, clicking the first vertex closes any polygon. Ctrl+drag moves a vertex along the surface. Delete removes the vertex or face under the cursor. |
+| **Create** (Q) | Click the surface to place vertices, or click existing ones; four make a quad, clicking the first vertex closes any polygon. Ctrl+drag moves a vertex along the surface; drop it on another vertex to weld them. |
 | **Draw** (D) | Drag across the surface to lay down a strip of quads. Strips snap to nearby vertices, so they connect. |
 | **Relax** (R) | Drag to smooth the retopo mesh; vertices stay on the surface and borders stay pinned unless *Relax borders* is on. |
+| **Loop** (I) | Hover an edge to preview an edge loop across its ring of quads; click to insert it, or drag along the edge to slide it first. Shift puts it in the middle. |
+| **Cut** (C) | Click on edges (or vertices) one after another to cut across the faces between them; right-click or Esc ends the cut. |
 
 The selection mode (1 vertices, 2 edges, 3 faces) applies in every tool. A
 selects or deselects everything, Esc deselects, L adds the edge loops through
 the selected edges (or the face loop through two neighboring faces) and
 Shift+L the edge rings.
+
+Edits work on the selection, from any tool or from the Retopology panel:
+Delete deletes it (with no selection, what is under the cursor), Backspace
+dissolves it (merging the faces around it), M merges the selected vertices at
+their center, J connects two selected vertices across their face and T
+rotates the selected edges (or the one under the cursor).
 
 Symmetry (X toggles it on the X axis) mirrors every edit. Ctrl+Z / Ctrl+Y undo
 and redo; Esc or a right click cancels the face in progress. If the retopo

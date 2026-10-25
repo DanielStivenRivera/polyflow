@@ -1,7 +1,7 @@
 //! Finding retopology elements under the cursor.
 
 use polyflow_core::glam::{Vec2, Vec3};
-use polyflow_core::halfedge::{EdgeId, FaceId, HalfEdgeMesh, VertexId};
+use polyflow_core::halfedge::{EdgeId, FaceId, HalfEdgeId, HalfEdgeMesh, VertexId};
 
 use super::selection::{Elements, SelectMode};
 use super::surface::Surface;
@@ -21,8 +21,22 @@ pub fn vertex(
     radius: f32,
     x_ray: bool,
 ) -> Option<VertexId> {
+    vertex_except(mesh, surface, view, cursor, radius, x_ray, None)
+}
+
+/// [`vertex`], ignoring `except`.
+pub fn vertex_except(
+    mesh: &HalfEdgeMesh,
+    surface: &Surface<'_>,
+    view: &ViewInfo,
+    cursor: Vec2,
+    radius: f32,
+    x_ray: bool,
+    except: Option<VertexId>,
+) -> Option<VertexId> {
     let mut candidates: Vec<(f32, VertexId)> = mesh
         .vertices()
+        .filter(|&v| Some(v) != except)
         .filter_map(|v| {
             let d = view.project(mesh.position(v))?.distance(cursor);
             (d <= radius).then_some((d, v))
@@ -92,6 +106,17 @@ pub fn edge(
         .take(VISIBILITY_CANDIDATES)
         .find(|&(_, _, p)| x_ray || surface.is_visible(eye, p))
         .map(|(_, e, _)| e)
+}
+
+/// Where along `h` (0 at its origin, 1 at its target) the cursor is, as seen
+/// on screen.
+pub fn halfedge_param(mesh: &HalfEdgeMesh, view: &ViewInfo, h: HalfEdgeId, cursor: Vec2) -> f32 {
+    let a = view.project(mesh.position(mesh.origin(h)));
+    let b = view.project(mesh.position(mesh.target(h)));
+    match (a, b) {
+        (Some(a), Some(b)) => closest_on_segment(cursor, a, b),
+        _ => 0.5,
+    }
 }
 
 /// A screen area to select in, in window pixels.
