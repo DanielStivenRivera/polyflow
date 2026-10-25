@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use polyflow_core::glam::Vec2;
 
+use crate::retopo::selection::SelectMode;
 use crate::retopo::symmetry::Axis;
 use crate::retopo::tools::{ToolKind, ToolSettings};
 
@@ -75,6 +76,8 @@ pub struct Stats<'a> {
     pub gpu_ms: Option<f32>,
     /// Relax brush outline (center and radius, physical pixels).
     pub brush: Option<(Vec2, f32)>,
+    /// Outline of the selection area being dragged (physical pixels).
+    pub region: Option<Vec<Vec2>>,
     /// Whether the pointer is over the 3D viewport (for the cursor shape).
     pub cursor_in_viewport: bool,
 }
@@ -111,6 +114,17 @@ pub struct Actions {
     pub bake: bool,
     pub cancel_bake: bool,
     pub choose_bake_output: bool,
+    pub select: Option<SelectAction>,
+}
+
+/// Selection commands from the retopology panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectAction {
+    All,
+    None,
+    Invert,
+    Loops,
+    Rings,
 }
 
 /// The bake panel's settings and state.
@@ -136,6 +150,10 @@ pub struct BakeUi<'a> {
 #[derive(Debug)]
 pub struct RetopoUi<'a> {
     pub tool: &'a mut ToolKind,
+    pub select_mode: &'a mut SelectMode,
+    pub lasso: &'a mut bool,
+    /// Number of selected elements.
+    pub selected: usize,
     pub settings: &'a mut ToolSettings,
     pub symmetry: &'a mut Option<Axis>,
     pub x_ray: &'a mut bool,
@@ -289,6 +307,20 @@ impl UiState {
                 radius / ppp,
                 egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 214, 64)),
             );
+        }
+        if let Some(outline) = &stats.region {
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("selection region"),
+            ));
+            let points: Vec<egui::Pos2> = outline
+                .iter()
+                .map(|p| egui::pos2(p.x / ppp, p.y / ppp))
+                .collect();
+            painter.add(egui::Shape::closed_line(
+                points,
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 214, 64)),
+            ));
         }
         if stats.cursor_in_viewport {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -501,6 +533,13 @@ fn retopo_panel(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Acti
         }
     });
     match retopo.tool {
+        ToolKind::Select => {
+            ui.horizontal(|ui| {
+                ui.radio_value(retopo.lasso, false, "Box");
+                ui.radio_value(retopo.lasso, true, "Lasso");
+            });
+            ui.weak("Click to select, drag for an area; Shift adds, Ctrl removes. Double-click selects a loop.");
+        }
         ToolKind::Create => {
             ui.weak("Click the surface to add vertices; 4 make a quad. Click the first vertex to close a polygon.");
         }
@@ -524,6 +563,7 @@ fn retopo_panel(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Acti
                 );
         }
     }
+    select_section(ui, retopo, actions);
     ui.horizontal(|ui| {
         ui.label("Symmetry");
         ui.selectable_value(retopo.symmetry, None, "Off");
@@ -852,8 +892,45 @@ fn cage_section(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Acti
     }
 }
 
+fn select_section(ui: &mut egui::Ui, retopo: &mut RetopoUi<'_>, actions: &mut Actions) {
+    ui.horizontal(|ui| {
+        for mode in SelectMode::ALL {
+            ui.selectable_value(retopo.select_mode, mode, mode.label())
+                .on_hover_text(format!(
+                    "Select {} ({})",
+                    mode.label().to_lowercase(),
+                    mode.shortcut()
+                ));
+        }
+        ui.weak(format!("{} selected", group_thousands(retopo.selected)));
+    });
+    ui.horizontal(|ui| {
+        let mut button = |ui: &mut egui::Ui, label: &str, hint: &str, action| {
+            if ui.small_button(label).on_hover_text(hint).clicked() {
+                actions.select = Some(action);
+            }
+        };
+        button(ui, "All", "Select everything (A toggles)", SelectAction::All);
+        button(ui, "None", "Deselect everything (Esc)", SelectAction::None);
+        button(ui, "Invert", "Select what is not selected", SelectAction::Invert);
+        button(
+            ui,
+            "Loops",
+            "Add the edge loops through the selected edges, or the face loop through two neighboring faces (L)",
+            SelectAction::Loops,
+        );
+        button(
+            ui,
+            "Rings",
+            "Add the edge rings through the selected edges (Shift+L)",
+            SelectAction::Rings,
+        );
+    });
+}
+
 fn tool_help(tool: ToolKind) -> &'static str {
     match tool {
+        ToolKind::Select => "Select vertices, edges or faces by clicking or dragging an area",
         ToolKind::Create => {
             "Place vertices and build faces. Ctrl+drag moves a vertex, Delete removes what is under the cursor"
         }

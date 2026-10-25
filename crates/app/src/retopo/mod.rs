@@ -3,6 +3,7 @@
 pub mod edit;
 pub mod geometry;
 pub mod pick;
+pub mod selection;
 pub mod surface;
 pub mod symmetry;
 pub mod tools;
@@ -13,6 +14,7 @@ use polyflow_core::halfedge::HalfEdgeMesh;
 use polyflow_core::history::MeshDocument;
 use polyflow_render::{Overlay, OverlayLine, OverlayPoint, OverlayVertex, Rgba8};
 
+use self::selection::Selection;
 use self::symmetry::{Axis, Symmetry};
 
 pub const FACE_COLOR: Rgba8 = Rgba8::new(70, 140, 255, 55);
@@ -26,6 +28,8 @@ pub const VERTEX_COLOR: Rgba8 = Rgba8::new(225, 238, 255, 255);
 pub const HOVER_COLOR: Rgba8 = Rgba8::new(255, 214, 64, 255);
 pub const HOVER_FACE_COLOR: Rgba8 = Rgba8::new(255, 214, 64, 70);
 pub const PENDING_COLOR: Rgba8 = Rgba8::new(255, 140, 40, 255);
+pub const SELECTED_COLOR: Rgba8 = Rgba8::new(255, 150, 30, 255);
+pub const SELECTED_FACE_COLOR: Rgba8 = Rgba8::new(255, 150, 30, 90);
 pub const VERTEX_SIZE: f32 = 7.0;
 pub const CAGE_COLOR: Rgba8 = Rgba8::new(140, 235, 90, 210);
 /// Default push of the automatic cage, as a fraction of the sculpt's radius
@@ -36,6 +40,7 @@ pub const DEFAULT_CAGE_PUSH: f32 = 0.03;
 #[derive(Debug)]
 pub struct Retopo {
     pub doc: MeshDocument,
+    pub selection: Selection,
     /// Mirror plane, if symmetry is on.
     pub symmetry_axis: Option<Axis>,
     /// Draw (and pick) the retopo mesh through the reference surface.
@@ -63,6 +68,9 @@ pub struct Retopo {
     mesh_overlay: Overlay,
     /// Mesh version and UV checker state the overlay was built for.
     mesh_overlay_key: Option<(u64, bool)>,
+    selection_overlay: Overlay,
+    /// Mesh version and selection generation the overlay was built for.
+    selection_overlay_key: Option<(u64, u64)>,
     /// Stats and the mesh version they were counted for.
     stats: Option<(u64, RetopoStats)>,
 }
@@ -80,6 +88,7 @@ impl Default for Retopo {
     fn default() -> Self {
         Self {
             doc: MeshDocument::default(),
+            selection: Selection::default(),
             symmetry_axis: None,
             x_ray: false,
             surface_offset: 0.01,
@@ -94,6 +103,8 @@ impl Default for Retopo {
             next_gesture: 0,
             mesh_overlay: Overlay::default(),
             mesh_overlay_key: None,
+            selection_overlay: Overlay::default(),
+            selection_overlay_key: None,
             stats: None,
         }
     }
@@ -107,6 +118,7 @@ impl Retopo {
     /// Replaces the mesh and its history (e.g. after importing a file).
     pub fn replace_mesh(&mut self, mesh: HalfEdgeMesh) {
         self.doc = MeshDocument::new(mesh);
+        self.selection.clear();
         self.mesh_overlay_key = None;
         self.stats = None;
         self.set_imported_cage(None);
@@ -155,10 +167,24 @@ impl Retopo {
         self.next_gesture
     }
 
-    /// Rebuilds the overlays that are out of date. Call once per frame
-    /// before [`Self::mesh_overlay`] and [`Self::cage_overlay`].
+    /// Drops selected elements that no longer exist, and rebuilds the
+    /// overlays that are out of date. Call once per frame before
+    /// [`Self::mesh_overlay`], [`Self::selection_overlay`] and
+    /// [`Self::cage_overlay`].
     pub fn update_overlays(&mut self) {
         let version = self.doc.mesh().version();
+        if self.selection_overlay_key.is_none_or(|(v, _)| v != version) {
+            self.selection.prune(self.doc.mesh());
+        }
+        let key = (version, self.selection.generation());
+        if self.selection_overlay_key != Some(key) {
+            build_selection_overlay(
+                self.doc.mesh(),
+                &self.selection,
+                &mut self.selection_overlay,
+            );
+            self.selection_overlay_key = Some(key);
+        }
         let key = (version, self.uv_checker);
         if self.mesh_overlay_key != Some(key) {
             build_mesh_overlay(self.doc.mesh(), self.uv_checker, &mut self.mesh_overlay);
@@ -180,6 +206,11 @@ impl Retopo {
     /// The mesh as overlay geometry (see [`Self::update_overlays`]).
     pub fn mesh_overlay(&self) -> &Overlay {
         &self.mesh_overlay
+    }
+
+    /// The selected elements, highlighted (see [`Self::update_overlays`]).
+    pub fn selection_overlay(&self) -> &Overlay {
+        &self.selection_overlay
     }
 
     /// The cage's wireframe, if it is shown (see [`Self::update_overlays`]).
@@ -223,6 +254,40 @@ fn build_cage_overlay(mesh: &HalfEdgeMesh, cage: &Cage, out: &mut Overlay) {
             a: at(mesh.origin(h)),
             b: at(mesh.target(h)),
             color: CAGE_COLOR,
+        });
+    }
+}
+
+fn build_selection_overlay(mesh: &HalfEdgeMesh, selection: &Selection, out: &mut Overlay) {
+    out.clear();
+    for &f in selection.faces() {
+        let p: Vec<_> = mesh.face_vertices(f).map(|v| mesh.position(v)).collect();
+        for i in 1..p.len() - 1 {
+            for q in [p[0], p[i], p[i + 1]] {
+                out.triangles
+                    .push(OverlayVertex::flat(q, SELECTED_FACE_COLOR));
+            }
+        }
+    }
+    let edges = selection.edges().iter().copied().chain(
+        selection
+            .faces()
+            .iter()
+            .flat_map(|&f| mesh.face_halfedges(f).map(|h| h.edge()).collect::<Vec<_>>()),
+    );
+    for e in edges {
+        let h = e.halfedge(0);
+        out.lines.push(OverlayLine {
+            a: mesh.position(mesh.origin(h)),
+            b: mesh.position(mesh.target(h)),
+            color: SELECTED_COLOR,
+        });
+    }
+    for &v in selection.vertices() {
+        out.points.push(OverlayPoint {
+            position: mesh.position(v),
+            color: SELECTED_COLOR,
+            size: VERTEX_SIZE + 2.0,
         });
     }
 }

@@ -27,6 +27,7 @@
 //! from DCC tools (Polyflow does not unwrap); faces created by the retopology
 //! tools have none.
 
+mod loops;
 mod ops;
 #[cfg(test)]
 mod tests;

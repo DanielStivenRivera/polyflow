@@ -4,6 +4,18 @@ All notable changes to Polyflow are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Selection**: the new **Select** tool (S) picks vertices, edges or faces
+  (1, 2, 3) by clicking or by dragging a box or a lasso; Shift adds and Ctrl
+  removes. Double-click selects the edge loop under the cursor, or in face
+  mode the face loop. L adds the loops through the selected edges, Shift+L
+  their rings; A selects or deselects everything, Esc deselects, and the
+  panel can also invert the selection. Hidden elements are left out unless
+  X-ray is on. The selection stays across tools, edits and undo.
+
 ## [0.2.0] - 2026-10-24
 
 Baking: bake normal maps and ambient occlusion from the sculpt onto the

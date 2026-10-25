@@ -203,7 +203,7 @@ Goal: retopologize a whole character without leaving Polyflow. Selection
 comes first because every other tool builds on it; every operation is one
 undo step and respects symmetry.
 
-1. Selection: vertices, edges and faces by click, box and lasso; edge loop
+1. ✅ Selection: vertices, edges and faces by click, box and lasso; edge loop
    and ring selection.
 2. Topology operations: weld/merge vertices, insert edge loop (with preview
    and slide), cut faces, dissolve vertices and edges, rotate edge, delete
@@ -218,6 +218,21 @@ undo step and respects symmetry.
 6. Hard edges in bakes: normals split at UV island borders or at marked
    edges, baked and exported that way in the low-poly.
 7. Polish and release v0.3.0.
+
+### Selection
+
+The selection holds vertex, edge or face ids, whichever the mode is; switching
+modes converts it (to smaller elements, their parts; to larger ones, those
+whose parts were all selected). Ids are stable, so the selection survives
+edits and undo; ids of removed elements are dropped whenever the mesh
+changes. Selection changes are not undo steps.
+
+Loops follow quad topology (`polyflow-core::halfedge::loops`): an edge loop
+goes straight through interior vertices with four edges and stops at poles
+and borders, and a border edge selects its whole border; an edge ring crosses
+quads to the opposite edge, and the quads it crosses are a face loop. Box and
+lasso pick visible elements only (all of them with X-ray): vertices inside
+the area, edges with both ends inside, faces with their center inside.
 
 Left for v0.4: height, cavity, curvature and ID maps; batch baking and
 Python bindings. UV unwrapping stays an open question.

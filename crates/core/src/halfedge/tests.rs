@@ -477,3 +477,86 @@ fn large_mesh_timing() {
         validate
     );
 }
+
+#[test]
+fn loops_and_rings_on_a_grid() {
+    let n = 4;
+    let (mut mesh, cells) = grid(n);
+    add_all(&mut mesh, &cells);
+    let at = |i: usize, j: usize| VertexId((j * (n + 1) + i) as u32);
+    let edge = |a, b| mesh.find_halfedge(a, b).unwrap().edge();
+    let ends = |edges: &[EdgeId]| -> Vec<VertexId> {
+        let mut v: Vec<VertexId> = edges
+            .iter()
+            .flat_map(|e| [mesh.origin(e.halfedge(0)), mesh.origin(e.halfedge(1))])
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+
+    // A row of horizontal edges, from border to border, in order.
+    let e = edge(at(1, 2), at(2, 2));
+    let row = mesh.edge_loop(e);
+    assert_eq!(row.len(), 4);
+    assert_eq!(ends(&row), (0..=n).map(|i| at(i, 2)).collect::<Vec<_>>());
+    assert!(
+        row.windows(2).all(|w| ends(w).len() == 3),
+        "consecutive edges touch"
+    );
+
+    // Across the quads of column 1: the 5 horizontal edges above each other.
+    let ring = mesh.edge_ring(e);
+    assert_eq!(ring.len(), n + 1);
+    assert!(ring.contains(&edge(at(1, 0), at(2, 0))));
+    assert!(ring.contains(&edge(at(1, n), at(2, n))));
+    let faces = mesh.face_loop(e);
+    assert_eq!(faces.len(), n);
+    for f in faces {
+        assert!(
+            mesh.face_vertices(f)
+                .any(|v| v == at(1, 0) || v == at(1, 1) || v == at(1, 2) || v == at(1, 3))
+        );
+    }
+
+    // A border edge gives the whole border.
+    let border = mesh.edge_loop(edge(at(0, 0), at(1, 0)));
+    assert_eq!(border.len(), 4 * n);
+    assert!(border.iter().all(|&e| mesh.is_boundary_edge(e)));
+}
+
+#[test]
+fn rings_close_around_a_cube() {
+    let corners = [
+        [0, 0, 0],
+        [1, 0, 0],
+        [1, 1, 0],
+        [0, 1, 0],
+        [0, 0, 1],
+        [1, 0, 1],
+        [1, 1, 1],
+        [0, 1, 1],
+    ];
+    let quads = [
+        [0, 3, 2, 1],
+        [4, 5, 6, 7],
+        [0, 1, 5, 4],
+        [1, 2, 6, 5],
+        [2, 3, 7, 6],
+        [3, 0, 4, 7],
+    ];
+    let mut mesh = HalfEdgeMesh::new();
+    let v: Vec<VertexId> = corners
+        .iter()
+        .map(|c| mesh.add_vertex(Vec3::from_array(c.map(|x| x as f32))))
+        .collect();
+    add_all(&mut mesh, &quads.map(|q| q.map(|i| v[i])));
+    let e = mesh.find_halfedge(v[0], v[1]).unwrap().edge();
+    let ring = mesh.edge_ring(e);
+    assert_eq!(ring.len(), 4);
+    assert_eq!(ring[0], e, "a closed ring starts at its edge");
+    assert_eq!(mesh.face_loop(e).len(), 4);
+    // Cube corners have three edges: a loop cannot continue through them.
+    assert_eq!(mesh.edge_loop(e), vec![e]);
+    assert_eq!(mesh.valence(v[0]), 3);
+}

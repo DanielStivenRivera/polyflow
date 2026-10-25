@@ -40,7 +40,7 @@ use crate::retopo::surface::Surface;
 use crate::retopo::symmetry::Axis;
 use crate::retopo::tools::{self, ToolInput, ToolKind, Tools};
 use crate::retopo::view::ViewInfo;
-use crate::ui::{Actions, Hover, MeshInfo, RetopoUi, Stats, UiState};
+use crate::ui::{Actions, Hover, MeshInfo, RetopoUi, SelectAction, Stats, UiState};
 
 /// Pixels of a high-resolution wheel/touchpad delta that count as one wheel line.
 const PIXELS_PER_SCROLL_LINE: f32 = 50.0;
@@ -478,6 +478,7 @@ impl AppState {
                 self.save_project(mods.shift_key(), |_| {});
             }
             Some("f") if !ctrl => self.frame_mesh(),
+            Some("s") if !ctrl => self.tools.select(ToolKind::Select),
             Some("q") if !ctrl => self.tools.select(ToolKind::Create),
             Some("d") if !ctrl => self.tools.select(ToolKind::Draw),
             Some("r") if !ctrl => self.tools.select(ToolKind::Relax),
@@ -692,6 +693,7 @@ impl AppState {
                 let input = tool_input!(self);
                 self.tools.brush_circle(&input, cursor_in_viewport)
             },
+            region: self.tools.region_outline(),
             cursor_in_viewport,
         };
         let retopo_stats = self.retopo.stats();
@@ -702,8 +704,12 @@ impl AppState {
             .map(|_| !self.retopo.imported_cage_is_stale());
         let auto_cage_push = self.retopo.scene_radius * retopo::DEFAULT_CAGE_PUSH;
         let scene_radius = self.retopo.scene_radius;
+        let mut select_mode = self.retopo.selection.mode();
         let mut retopo_ui = RetopoUi {
             tool: &mut self.tools.active,
+            select_mode: &mut select_mode,
+            lasso: &mut self.tools.lasso,
+            selected: self.retopo.selection.len(),
             settings: &mut self.tools.settings,
             symmetry: &mut self.retopo.symmetry_axis,
             x_ray: &mut self.retopo.x_ray,
@@ -793,6 +799,20 @@ impl AppState {
         if actions.clear_retopo {
             self.clear_retopo();
         }
+        if select_mode != self.retopo.selection.mode() {
+            let input = tool_input!(self);
+            self.tools
+                .set_select_mode(&mut self.retopo, &input, select_mode);
+        }
+        let mesh = self.retopo.doc.mesh();
+        match actions.select {
+            Some(SelectAction::All) => self.retopo.selection.select_all(mesh),
+            Some(SelectAction::None) => self.retopo.selection.clear(),
+            Some(SelectAction::Invert) => self.retopo.selection.invert(mesh),
+            Some(SelectAction::Loops) => self.tools.grow_loops(&mut self.retopo, false),
+            Some(SelectAction::Rings) => self.tools.grow_loops(&mut self.retopo, true),
+            None => {}
+        }
         self.tools.overlay(&self.retopo, &mut self.tool_overlay);
         let x_ray = self.retopo.x_ray;
         let surface_offset = self.retopo.surface_offset;
@@ -803,6 +823,8 @@ impl AppState {
         let mut overlays = vec![&self.tool_overlay];
         if preview.is_none() {
             overlays.push(self.retopo.mesh_overlay());
+            // After the mesh, so selected edges draw over its edges.
+            overlays.push(self.retopo.selection_overlay());
             overlays.extend(self.retopo.cage_overlay());
         }
         self.renderer.set_vsync(self.ui.vsync);
